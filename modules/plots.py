@@ -925,3 +925,286 @@ def strip_plot(
     )
     fig.update_layout(showlegend=True)
     return fig
+
+
+# ---------------------------------------------------------------------------
+# 11. Efficient frontier
+# ---------------------------------------------------------------------------
+
+def efficient_frontier(frontier, show_assets: bool = True) -> go.Figure:
+    """
+    Plot the efficient frontier from a portfolio.EfficientFrontier object.
+
+    frontier    : EfficientFrontier returned by portfolio.efficient_frontier()
+    show_assets : overlay individual asset risk/return as dots
+
+    The plot shows:
+      - The full frontier curve coloured by Sharpe ratio
+      - Max Sharpe portfolio (star marker)
+      - Min Variance portfolio (diamond marker)
+      - Capital Market Line from risk-free rate through max Sharpe
+      - Individual assets (optional)
+    """
+    from modules.portfolio import EfficientFrontier as EF
+
+    pts = frontier.points
+    ms  = frontier.max_sharpe
+    mv  = frontier.min_variance
+    rf  = ms.risk_free_rate
+
+    fig = go.Figure()
+
+    # --- frontier curve coloured by Sharpe --------------------------------
+    fig.add_trace(go.Scatter(
+        x=pts["volatility"],
+        y=pts["return"],
+        mode="lines+markers",
+        marker=dict(
+            size=6,
+            color=pts["sharpe"],
+            colorscale="RdYlGn",
+            showscale=True,
+            colorbar=dict(
+                title="Sharpe",
+                thickness=12,
+                len=0.6,
+                tickfont=dict(size=9, color="#888780"),
+                outlinewidth=0,
+            ),
+        ),
+        line=dict(color="rgba(0,0,0,0.15)", width=1),
+        customdata=np.stack([pts["return"], pts["sharpe"]], axis=1),
+        hovertemplate=(
+            "Vol: %{x:.2%}<br>"
+            "Return: %{customdata[0]:.2%}<br>"
+            "Sharpe: %{customdata[1]:.3f}"
+            "<extra>Frontier</extra>"
+        ),
+        showlegend=False,
+    ))
+
+    # --- Capital Market Line (CML) ----------------------------------------
+    cml_x = np.linspace(0, pts["volatility"].max() * 1.1, 100)
+    slope  = (ms.expected_return - rf) / ms.volatility
+    cml_y  = rf + slope * cml_x
+    fig.add_trace(go.Scatter(
+        x=cml_x, y=cml_y,
+        mode="lines",
+        line=dict(color="#888780", width=1.2, dash="dash"),
+        name="Capital Market Line",
+        hoverinfo="skip",
+    ))
+
+    # --- risk-free rate dot -----------------------------------------------
+    fig.add_trace(go.Scatter(
+        x=[0], y=[rf],
+        mode="markers+text",
+        marker=dict(size=8, color="#888780", symbol="circle"),
+        text=["Rf"], textposition="top right",
+        textfont=dict(size=9, color="#888780"),
+        name=f"Risk-free ({rf:.1%})",
+        hovertemplate=f"Risk-free rate: {rf:.2%}<extra></extra>",
+    ))
+
+    # --- individual assets ------------------------------------------------
+    if show_assets:
+        q_syms  = frontier.symbols
+        # re-use already-fetched data from frontier points
+        # compute each asset's own vol and return from the frontier's first/last weights
+        for sym, color in zip(q_syms, _PALETTE):
+            if sym not in pts.columns:
+                continue
+            # find a frontier point where this asset has ~100% weight (edge of frontier)
+            # instead use max-weight point as proxy for individual asset risk/return
+            asset_col = pts[sym]
+            idx = asset_col.idxmax()
+            if idx is not None and idx in pts.index:
+                a_ret = pts.loc[idx, "return"]
+                a_vol = pts.loc[idx, "volatility"]
+                fig.add_trace(go.Scatter(
+                    x=[a_vol], y=[a_ret],
+                    mode="markers+text",
+                    marker=dict(size=10, color=color, symbol="circle",
+                                line=dict(color="white", width=1)),
+                    text=[sym], textposition="top right",
+                    textfont=dict(size=9, color=color),
+                    name=sym,
+                    hovertemplate=(
+                        f"<b>{sym}</b><br>"
+                        f"Vol: %{{x:.2%}}<br>"
+                        f"Return: %{{y:.2%}}<extra></extra>"
+                    ),
+                ))
+
+    # --- Max Sharpe -------------------------------------------------------
+    fig.add_trace(go.Scatter(
+        x=[ms.volatility], y=[ms.expected_return],
+        mode="markers+text",
+        marker=dict(size=18, symbol="star", color="#1D9E75",
+                    line=dict(color="white", width=1.5)),
+        text=["Max Sharpe"], textposition="top right",
+        textfont=dict(size=10, color="#1D9E75", family="sans-serif"),
+        name=f"Max Sharpe ({ms.sharpe_ratio:.2f})",
+        hovertemplate=(
+            "<b>Max Sharpe</b><br>"
+            f"Sharpe: {ms.sharpe_ratio:.3f}<br>"
+            f"Return: {ms.expected_return:.2%}<br>"
+            f"Vol: {ms.volatility:.2%}<extra></extra>"
+        ),
+    ))
+
+    # --- Min Variance -----------------------------------------------------
+    fig.add_trace(go.Scatter(
+        x=[mv.volatility], y=[mv.expected_return],
+        mode="markers+text",
+        marker=dict(size=14, symbol="diamond", color="#378ADD",
+                    line=dict(color="white", width=1.5)),
+        text=["Min Var"], textposition="top right",
+        textfont=dict(size=10, color="#378ADD"),
+        name=f"Min Variance",
+        hovertemplate=(
+            "<b>Min Variance</b><br>"
+            f"Sharpe: {mv.sharpe_ratio:.3f}<br>"
+            f"Return: {mv.expected_return:.2%}<br>"
+            f"Vol: {mv.volatility:.2%}<extra></extra>"
+        ),
+    ))
+
+    fig.update_xaxes(title_text="Annualised volatility", tickformat=".1%")
+    fig.update_yaxes(title_text="Annualised return",     tickformat=".1%")
+    _apply_layout(
+        fig,
+        title="Efficient Frontier",
+        subtitle=f"period: {_period_label(frontier.period)}  ·  "
+                 f"rf: {rf:.1%}  ·  {len(frontier.symbols)} assets",
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 12. Backtest — equity curve + drawdown + metrics
+# ---------------------------------------------------------------------------
+
+def backtest(result, show_drawdown: bool = True) -> go.Figure:
+    """
+    Plot a BacktestResult: equity curve(s) + optional drawdown panel.
+
+    result       : BacktestResult from backtest.run()
+    show_drawdown: add a drawdown subplot below the equity curve
+    """
+    rows   = 2 if show_drawdown else 1
+    heights= [0.68, 0.32] if show_drawdown else [1.0]
+
+    fig = make_subplots(
+        rows=rows, cols=1,
+        shared_xaxes=True,
+        row_heights=heights,
+        vertical_spacing=0.04,
+    )
+
+    # --- equity curve ----------------------------------------------------
+    fig.add_trace(go.Scatter(
+        x=result.equity_curve.index,
+        y=result.equity_curve.values,
+        mode="lines",
+        name=result.strategy_name,
+        line=dict(color=_PALETTE[0], width=2),
+        hovertemplate=(
+            "%{x|%Y-%m-%d}<br>"
+            f"{result.strategy_name}: %{{y:$,.0f}}<extra></extra>"
+        ),
+    ), row=1, col=1)
+
+    # --- benchmark equity curve ------------------------------------------
+    if result.benchmark_result:
+        bm = result.benchmark_result
+        # rescale benchmark to same starting capital
+        bm_eq = bm.equity_curve * (result.initial_capital / bm.equity_curve.iloc[0])
+        fig.add_trace(go.Scatter(
+            x=bm_eq.index,
+            y=bm_eq.values,
+            mode="lines",
+            name=bm.strategy_name,
+            line=dict(color=_PALETTE[2], width=1.5, dash="dot"),
+            hovertemplate=(
+                "%{x|%Y-%m-%d}<br>"
+                f"{bm.strategy_name}: %{{y:$,.0f}}<extra></extra>"
+            ),
+        ), row=1, col=1)
+
+    # --- drawdown panel --------------------------------------------------
+    if show_drawdown:
+        roll_max = result.equity_curve.cummax()
+        dd       = (result.equity_curve - roll_max) / roll_max
+
+        fig.add_trace(go.Scatter(
+            x=dd.index, y=dd.values,
+            mode="lines",
+            fill="tozeroy",
+            fillcolor="rgba(226,75,74,0.15)",
+            line=dict(color="#E24B4A", width=1),
+            name="Drawdown",
+            hovertemplate="%{x|%Y-%m-%d}<br>Drawdown: %{y:.1%}<extra></extra>",
+        ), row=2, col=1)
+
+        if result.benchmark_result:
+            bm = result.benchmark_result
+            bm_eq  = bm.equity_curve * (result.initial_capital / bm.equity_curve.iloc[0])
+            bm_max = bm_eq.cummax()
+            bm_dd  = (bm_eq - bm_max) / bm_max
+            fig.add_trace(go.Scatter(
+                x=bm_dd.index, y=bm_dd.values,
+                mode="lines",
+                line=dict(color=_PALETTE[2], width=1, dash="dot"),
+                name=f"{bm.strategy_name} DD",
+                hovertemplate="%{x|%Y-%m-%d}<br>DD: %{y:.1%}<extra></extra>",
+            ), row=2, col=1)
+
+        fig.update_yaxes(title_text="Drawdown", tickformat=".0%", row=2, col=1,
+                         tickfont=dict(size=9, color="#888780"),
+                         gridcolor="#D3D1C7", zerolinecolor="#B4B2A9")
+
+    # --- metrics annotation box ------------------------------------------
+    m = result.metrics
+    ann_lines = [
+        f"CAGR: {m['cagr']:.1%}",
+        f"Vol: {m['volatility']:.1%}",
+        f"Sharpe: {m['sharpe_ratio']:.2f}",
+        f"Max DD: {m['max_drawdown']:.1%}",
+        f"Win rate: {m['win_rate']:.0%}",
+    ]
+    if result.benchmark_result:
+        bm = result.benchmark_result.metrics
+        ann_lines += [
+            f"<br><b>vs {result.benchmark_result.strategy_name}</b>",
+            f"CAGR: {bm['cagr']:.1%}",
+            f"Sharpe: {bm['sharpe_ratio']:.2f}",
+        ]
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.01, y=0.97,
+        text="<br>".join(ann_lines),
+        showarrow=False, align="left",
+        font=dict(size=10, color="#5F5E5A"),
+        bgcolor="rgba(255,255,255,0.7)",
+        bordercolor="#D3D1C7", borderwidth=0.5,
+        borderpad=8, row=1, col=1,
+    )
+
+    # --- styling ---------------------------------------------------------
+    fig.update_yaxes(title_text="Portfolio value ($)", tickformat="$,.0f",
+                     row=1, col=1,
+                     tickfont=dict(size=9, color="#888780"),
+                     gridcolor="#D3D1C7", zerolinecolor="#B4B2A9")
+    fig.update_xaxes(tickfont=dict(size=9, color="#888780"),
+                     gridcolor="#D3D1C7")
+    fig.update_layout(
+        **_LAYOUT,
+        title=dict(
+            text=f"<b>Backtest — {result.strategy_name}</b>"
+                 f"<br><sup style='color:#888780'>period: {_period_label(result.period)}"
+                 f"  ·  rebalance embedded in positions</sup>",
+            font=dict(size=15, color="#2C2C2A"), x=0.02,
+        ),
+        hovermode="x unified",
+    )
+    return fig
