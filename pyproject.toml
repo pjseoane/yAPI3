@@ -1,0 +1,12 @@
+[project]
+requires-python = ">=3.13,<3.14"
+name = "yfinanceAPI"
+version = "0.0.1"
+description = "Reusable quantitative finance engine"
+authors = [{name="Paulino, Anthropic"}]
+dependencies = [
+    "yfinance>=0.2",
+    "scipy",
+    "matplotlib",
+    "plotly",
+    ]

@@ -1,0 +1,580 @@
+"""
+QuantAnalytics — quantitative metrics built on top of StockClient.
+
+Requires: numpy, pandas, scipy
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+from .stock_client import StockClient
+
+
+class QuantAnalytics:
+    """
+    Compute quantitative metrics for one or many symbols.
+
+    All historical data is fetched through a StockClient instance,
+    so the cache layer is automatically reused.
+
+    Parameters
+    ----------
+    client : StockClient
+        A configured StockClient (handles fetching + caching).
+    trading_days : int
+        Number of trading days per year used for annualisation (default 252).
+    """
+
+    def __init__(self, client: StockClient, trading_days: int = 252) -> None:
+        self.client = client
+        self.trading_days = trading_days
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _prices(self, symbol: str, period: str, interval: str = "1d") -> pd.Series:
+        """
+        Return an Adj-Close price Series indexed by date.
+
+        Always uses adjusted=True so prices are split- and dividend-corrected.
+        This is the correct input for return, volatility, beta, and Sharpe
+        calculations — raw closes would distort every metric around ex-div dates
+        and stock splits.
+        """
+        bars = self.client.get_history(symbol, period=period, interval=interval, adjusted=True)
+        if not bars:
+            raise ValueError(f"No history returned for '{symbol}' (period={period})")
+        df = pd.DataFrame(bars)
+        df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+        return df.set_index("date")["adj_close"].sort_index().astype(float)
+
+    def _prices_bulk(
+        self, symbols: list[str], period: str, interval: str = "1d"
+    ) -> pd.DataFrame:
+        """Return a DataFrame of closing prices, one column per symbol."""
+        series = {sym: self._prices(sym, period, interval) for sym in symbols}
+        return pd.DataFrame(series).sort_index()
+
+    @staticmethod
+    def _log_returns(prices: pd.Series) -> pd.Series:
+        return np.log(prices / prices.shift(1)).dropna()
+
+    @staticmethod
+    def _simple_returns(prices: pd.Series) -> pd.Series:
+        return prices.pct_change().dropna()
+
+    # ------------------------------------------------------------------
+    # Returns
+    # ------------------------------------------------------------------
+
+    def returns(
+        self,
+        symbol: str,
+        period: str = "1y",
+        method: str = "log",      # "log" | "simple"
+        interval: str = "1d",
+    ) -> pd.Series:
+        """Daily log or simple returns for a single symbol."""
+        prices = self._prices(symbol, period, interval)
+        fn = self._log_returns if method == "log" else self._simple_returns
+        series = fn(prices)
+        series.name = symbol
+        return series
+
+    def returns_bulk(
+        self,
+        symbols: list[str],
+        period: str = "1y",
+        method: str = "log",
+        interval: str = "1d",
+    ) -> pd.DataFrame:
+        """Daily returns for multiple symbols aligned on the same dates."""
+        prices = self._prices_bulk(symbols, period, interval)
+        fn = (lambda p: np.log(p / p.shift(1))) if method == "log" else (lambda p: p.pct_change())
+        return fn(prices).dropna()
+
+    # ------------------------------------------------------------------
+    # Volatility
+    # ------------------------------------------------------------------
+
+    def historical_volatility(
+        self,
+        symbol: str,
+        period: str = "1y",
+        interval: str = "1d",
+        annualise: bool = True,
+    ) -> float:
+        """
+        Annualised historical volatility (std of log returns).
+
+        Returns a float, e.g. 0.28 means 28 % annualised vol.
+        """
+        rets = self._log_returns(self._prices(symbol, period, interval))
+        vol = rets.std()
+        return float(vol * np.sqrt(self.trading_days)) if annualise else float(vol)
+
+    def rolling_volatility(
+        self,
+        symbol: str,
+        period: str = "1y",
+        window: int = 21,          # ~1 trading month
+        interval: str = "1d",
+        annualise: bool = True,
+    ) -> pd.Series:
+        """Rolling volatility over a *window*-day window."""
+        rets = self._log_returns(self._prices(symbol, period, interval))
+        rv = rets.rolling(window).std()
+        if annualise:
+            rv = rv * np.sqrt(self.trading_days)
+        rv.name = f"{symbol}_vol_{window}d"
+        return rv.dropna()
+
+    def volatility_bulk(
+        self,
+        symbols: list[str],
+        period: str = "1y",
+        interval: str = "1d",
+    ) -> dict[str, float]:
+        """Annualised historical vol for every symbol in one call."""
+        return {
+            sym: self.historical_volatility(sym, period, interval)
+            for sym in symbols
+        }
+
+    # ------------------------------------------------------------------
+    # Correlation & covariance
+    # ------------------------------------------------------------------
+
+    def correlation_matrix(
+        self,
+        symbols: list[str],
+        period: str = "1y",
+        interval: str = "1d",
+    ) -> pd.DataFrame:
+        """Pearson correlation matrix of daily log returns."""
+        return self.returns_bulk(symbols, period, interval=interval).corr()
+
+    def covariance_matrix(
+        self,
+        symbols: list[str],
+        period: str = "1y",
+        interval: str = "1d",
+        annualise: bool = True,
+    ) -> pd.DataFrame:
+        """Annualised covariance matrix of daily log returns."""
+        cov = self.returns_bulk(symbols, period, interval=interval).cov()
+        return cov * (self.trading_days if annualise else 1)
+
+    # ------------------------------------------------------------------
+    # Beta
+    # ------------------------------------------------------------------
+
+    def beta(
+        self,
+        symbol: str,
+        benchmark: str = "SPY",
+        period: str = "1y",
+        interval: str = "1d",
+    ) -> float:
+        """
+        Beta of *symbol* relative to *benchmark* (OLS slope).
+
+        A beta > 1 means the stock amplifies benchmark moves.
+        """
+        rets = self.returns_bulk([symbol, benchmark], period, interval=interval).dropna()
+        slope, *_ = np.polyfit(rets[benchmark], rets[symbol], deg=1)
+        return float(slope)
+
+    def beta_bulk(
+        self,
+        symbols: list[str],
+        benchmark: str = "SPY",
+        period: str = "1y",
+    ) -> dict[str, float]:
+        """Beta for multiple symbols against the same benchmark."""
+        all_syms = list(dict.fromkeys([benchmark] + symbols))  # benchmark first, deduped
+        rets = self.returns_bulk(all_syms, period).dropna()
+        bench_rets = rets[benchmark]
+        results = {}
+        for sym in symbols:
+            slope, *_ = np.polyfit(bench_rets, rets[sym], deg=1)
+            results[sym] = float(slope)
+        return results
+
+    # ------------------------------------------------------------------
+    # Risk-adjusted returns
+    # ------------------------------------------------------------------
+
+    def sharpe_ratio(
+        self,
+        symbol: str,
+        period: str = "1y",
+        risk_free_rate: float = 0.05,   # annual, e.g. 0.05 = 5 %
+        interval: str = "1d",
+    ) -> float:
+        """
+        Annualised Sharpe ratio.
+
+        sharpe = (mean_return - rf) / std  ×  √trading_days
+        """
+        rets = self._simple_returns(self._prices(symbol, period, interval))
+        daily_rf = risk_free_rate / self.trading_days
+        excess = rets - daily_rf
+        return float(excess.mean() / excess.std() * np.sqrt(self.trading_days))
+
+    def sortino_ratio(
+        self,
+        symbol: str,
+        period: str = "1y",
+        risk_free_rate: float = 0.05,
+        interval: str = "1d",
+    ) -> float:
+        """
+        Sortino ratio — like Sharpe but penalises only downside deviation.
+        """
+        rets = self._simple_returns(self._prices(symbol, period, interval))
+        daily_rf = risk_free_rate / self.trading_days
+        excess = rets - daily_rf
+        downside = excess[excess < 0].std()
+        return float(excess.mean() / downside * np.sqrt(self.trading_days))
+
+    # ------------------------------------------------------------------
+    # Drawdown
+    # ------------------------------------------------------------------
+
+    def drawdown_series(self, symbol: str, period: str = "1y") -> pd.Series:
+        """Return the full drawdown time-series (0 to -1 scale)."""
+        prices = self._prices(symbol, period)
+        roll_max = prices.cummax()
+        dd = (prices - roll_max) / roll_max
+        dd.name = f"{symbol}_drawdown"
+        return dd
+
+    def max_drawdown(self, symbol: str, period: str = "1y") -> float:
+        """Maximum drawdown over the period (negative float, e.g. -0.35 = -35 %)."""
+        return float(self.drawdown_series(symbol, period).min())
+
+    def calmar_ratio(
+        self,
+        symbol: str,
+        period: str = "3y",
+    ) -> float:
+        """Calmar ratio = annualised return / |max drawdown|."""
+        prices = self._prices(symbol, period)
+        n_years = len(prices) / self.trading_days
+        total_return = (prices.iloc[-1] / prices.iloc[0]) - 1
+        annual_return = (1 + total_return) ** (1 / n_years) - 1
+        mdd = abs(self.max_drawdown(symbol, period))
+        return float(annual_return / mdd) if mdd else float("inf")
+
+    # ------------------------------------------------------------------
+    # Value at Risk
+    # ------------------------------------------------------------------
+
+    def var(
+        self,
+        symbol: str,
+        period: str = "1y",
+        confidence: float = 0.95,
+        method: str = "historical",   # "historical" | "parametric"
+        horizon: int = 1,             # days
+    ) -> float:
+        """
+        Value at Risk (VaR) at the given confidence level.
+
+        Returns a positive float representing the potential loss,
+        e.g. 0.025 means 2.5 % of portfolio value at risk.
+
+        method="historical"  : empirical quantile of past returns
+        method="parametric"  : assumes normally distributed returns
+        """
+        rets = self._simple_returns(self._prices(symbol, period))
+        if method == "historical":
+            var_1d = float(-np.percentile(rets, (1 - confidence) * 100))
+        else:  # parametric
+            mu, sigma = rets.mean(), rets.std()
+            var_1d = float(-(mu + stats.norm.ppf(1 - confidence) * sigma))
+        return var_1d * np.sqrt(horizon)
+
+    def cvar(
+        self,
+        symbol: str,
+        period: str = "1y",
+        confidence: float = 0.95,
+    ) -> float:
+        """
+        Conditional VaR (Expected Shortfall) — average loss beyond VaR.
+        """
+        rets = self._simple_returns(self._prices(symbol, period))
+        threshold = np.percentile(rets, (1 - confidence) * 100)
+        tail = rets[rets <= threshold]
+        return float(-tail.mean())
+
+    # ------------------------------------------------------------------
+    # Portfolio-level
+    # ------------------------------------------------------------------
+
+    def portfolio_return(
+        self,
+        symbols: list[str],
+        weights: list[float],
+        period: str = "1y",
+    ) -> float:
+        """
+        Expected annualised portfolio return given weights.
+
+        weights must sum to 1.0.
+        """
+        weights = np.array(weights)
+        assert abs(weights.sum() - 1.0) < 1e-6, "Weights must sum to 1"
+        rets = self.returns_bulk(symbols, period).mean()
+        return float((rets @ weights) * self.trading_days)
+
+    def portfolio_volatility(
+        self,
+        symbols: list[str],
+        weights: list[float],
+        period: str = "1y",
+    ) -> float:
+        """Annualised portfolio volatility given weights."""
+        weights = np.array(weights)
+        cov = self.covariance_matrix(symbols, period)
+        variance = weights @ cov.values @ weights
+        return float(np.sqrt(variance))
+
+    def portfolio_sharpe(
+        self,
+        symbols: list[str],
+        weights: list[float],
+        period: str = "1y",
+        risk_free_rate: float = 0.05,
+    ) -> float:
+        """Sharpe ratio for the weighted portfolio."""
+        ret = self.portfolio_return(symbols, weights, period)
+        vol = self.portfolio_volatility(symbols, weights, period)
+        return float((ret - risk_free_rate) / vol)
+
+    def portfolio_summary(
+        self,
+        symbols: list[str],
+        weights: list[float],
+        period: str = "1y",
+        risk_free_rate: float = 0.05,
+    ) -> dict:
+        """One-call summary of all portfolio-level metrics."""
+        return {
+            "symbols": symbols,
+            "weights": weights,
+            "period": period,
+            "annualised_return": self.portfolio_return(symbols, weights, period),
+            "annualised_volatility": self.portfolio_volatility(symbols, weights, period),
+            "sharpe_ratio": self.portfolio_sharpe(symbols, weights, period, risk_free_rate),
+            "correlation_matrix": self.correlation_matrix(symbols, period).to_dict(),
+        }
+
+    # ------------------------------------------------------------------
+    # DataFrame outputs  (dates as rows, symbols as columns)
+    # ------------------------------------------------------------------
+
+    def prices_df(
+        self,
+        symbols: list[str],
+        period: str = "1y",
+        interval: str = "1d",
+    ) -> pd.DataFrame:
+        """
+        Closing prices aligned on the same date index.
+
+              date       AAPL    MSFT    GOOGL
+        2024-01-02  185.20  374.02  140.93
+        ...
+        """
+        return self._prices_bulk(symbols, period, interval)
+
+    def returns_df(
+        self,
+        symbols: list[str],
+        period: str = "1y",
+        method: str = "log",        # "log" | "simple"
+        interval: str = "1d",
+    ) -> pd.DataFrame:
+        """
+        Daily returns, one column per symbol.
+
+              date       AAPL    MSFT    GOOGL
+        2024-01-03   0.0023  -0.0011   0.0041
+        ...
+        """
+        return self.returns_bulk(symbols, period, method, interval)
+
+    def cumulative_returns_df(
+        self,
+        symbols: list[str],
+        period: str = "1y",
+        interval: str = "1d",
+        base: float = 100.0,        # rebase starting value (100 = percentage chart)
+    ) -> pd.DataFrame:
+        """
+        Cumulative simple returns rebased to *base* (default 100).
+
+        Useful for comparing growth of $100 invested across stocks.
+
+              date       AAPL    MSFT    GOOGL
+        2024-01-02  100.00  100.00  100.00
+        2024-01-03  102.30   99.89  100.41
+        ...
+        """
+        prices = self._prices_bulk(symbols, period, interval)
+        return base * prices / prices.iloc[0]
+
+    def rolling_volatility_df(
+        self,
+        symbols: list[str],
+        period: str = "1y",
+        window: int = 21,
+        interval: str = "1d",
+        annualise: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Rolling annualised volatility for each symbol.
+
+              date       AAPL    MSFT    GOOGL
+        2024-02-01   0.2341  0.1987  0.2103
+        ...
+        """
+        series = {}
+        for sym in symbols:
+            rets = self._log_returns(self._prices(sym, period, interval))
+            rv = rets.rolling(window).std()
+            if annualise:
+                rv = rv * np.sqrt(self.trading_days)
+            series[sym] = rv
+        return pd.DataFrame(series).dropna()
+
+    def drawdown_df(
+        self,
+        symbols: list[str],
+        period: str = "1y",
+    ) -> pd.DataFrame:
+        """
+        Drawdown series for each symbol (0 to -1 scale).
+
+              date       AAPL    MSFT    GOOGL
+        2024-01-02   0.0000   0.0000   0.0000
+        2024-03-15  -0.1230  -0.0891  -0.1502
+        ...
+        """
+        series = {}
+        for sym in symbols:
+            prices = self._prices(sym, period)
+            roll_max = prices.cummax()
+            series[sym] = (prices - roll_max) / roll_max
+        return pd.DataFrame(series)
+
+    def rolling_sharpe_df(
+        self,
+        symbols: list[str],
+        period: str = "1y",
+        window: int = 63,           # ~1 trading quarter
+        risk_free_rate: float = 0.05,
+        interval: str = "1d",
+    ) -> pd.DataFrame:
+        """
+        Rolling Sharpe ratio over a *window*-day window, one column per symbol.
+        """
+        daily_rf = risk_free_rate / self.trading_days
+        series = {}
+        for sym in symbols:
+            rets = self._simple_returns(self._prices(sym, period, interval))
+            excess = rets - daily_rf
+            rolling_sharpe = (
+                excess.rolling(window).mean()
+                / excess.rolling(window).std()
+                * np.sqrt(self.trading_days)
+            )
+            series[sym] = rolling_sharpe
+        return pd.DataFrame(series).dropna()
+
+    def rolling_beta_df(
+        self,
+        symbols: list[str],
+        benchmark: str = "SPY",
+        period: str = "1y",
+        window: int = 63,
+        interval: str = "1d",
+    ) -> pd.DataFrame:
+        """
+        Rolling beta versus *benchmark*, one column per symbol.
+        """
+        all_syms = list(dict.fromkeys([benchmark] + symbols))
+        rets = self.returns_bulk(all_syms, period, interval=interval).dropna()
+        bench = rets[benchmark]
+        series = {}
+        for sym in symbols:
+            stock = rets[sym]
+            cov = stock.rolling(window).cov(bench)
+            var = bench.rolling(window).var()
+            series[sym] = cov / var
+        return pd.DataFrame(series).dropna()
+
+    def metrics_df(
+        self,
+        symbols: list[str],
+        benchmark: str = "SPY",
+        period: str = "1y",
+        risk_free_rate: float = 0.05,
+    ) -> pd.DataFrame:
+        """
+        Cross-sectional summary table — one row per metric, one column per symbol.
+
+                                AAPL    MSFT    GOOGL
+        annualised_volatility  0.281   0.199   0.231
+        max_drawdown          -0.143  -0.098  -0.172
+        sharpe_ratio           1.320   1.540   1.102
+        sortino_ratio          1.891   2.210   1.543
+        beta                   1.142   0.921   1.034
+        var_95_1d              0.022   0.017   0.021
+        cvar_95_1d             0.032   0.025   0.030
+        """
+        records = {}
+        for sym in symbols:
+            records[sym] = {
+                "annualised_volatility": self.historical_volatility(sym, period),
+                "max_drawdown":          self.max_drawdown(sym, period),
+                "sharpe_ratio":          self.sharpe_ratio(sym, period, risk_free_rate),
+                "sortino_ratio":         self.sortino_ratio(sym, period, risk_free_rate),
+                "beta":                  self.beta(sym, benchmark, period),
+                "calmar_ratio":          self.calmar_ratio(sym, "3y"),
+                "var_95_1d":             self.var(sym, period, confidence=0.95),
+                "cvar_95_1d":            self.cvar(sym, period, confidence=0.95),
+            }
+        return pd.DataFrame(records)
+
+    # ------------------------------------------------------------------
+    # Convenience: full single-stock report
+    # ------------------------------------------------------------------
+
+    def stock_report(
+        self,
+        symbol: str,
+        benchmark: str = "SPY",
+        period: str = "1y",
+        risk_free_rate: float = 0.05,
+    ) -> dict:
+        """All key metrics for a single stock in one dict."""
+        return {
+            "symbol": symbol,
+            "period": period,
+            "annualised_volatility": self.historical_volatility(symbol, period),
+            "max_drawdown": self.max_drawdown(symbol, period),
+            "sharpe_ratio": self.sharpe_ratio(symbol, period, risk_free_rate),
+            "sortino_ratio": self.sortino_ratio(symbol, period, risk_free_rate),
+            "beta": self.beta(symbol, benchmark, period),
+            "calmar_ratio": self.calmar_ratio(symbol, "3y"),
+            "var_95_1d": self.var(symbol, period, confidence=0.95),
+            "cvar_95_1d": self.cvar(symbol, period, confidence=0.95),
+        }
