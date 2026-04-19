@@ -1208,3 +1208,196 @@ def backtest(result, show_drawdown: bool = True) -> go.Figure:
         hovermode="x unified",
     )
     return fig
+
+
+# ---------------------------------------------------------------------------
+# 13. Monte Carlo — fan chart + terminal value histogram
+# ---------------------------------------------------------------------------
+
+def monte_carlo(result, show_paths: int = 50) -> go.Figure:
+    """
+    Two-panel Monte Carlo visualisation.
+
+    Top panel  : fan chart — percentile bands + sample paths
+    Bottom panel: terminal value distribution — histogram + VaR/CVaR markers
+
+    result      : MonteCarloResult from montecarlo.simulate()
+    show_paths  : number of individual sample paths to draw (default 50)
+                  Set to 0 to hide individual paths.
+    """
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.62, 0.38],
+        vertical_spacing=0.08,
+        subplot_titles=["Simulated portfolio paths", "Terminal value distribution"],
+    )
+
+    pct   = result.percentiles
+    days  = list(pct.index)
+    init  = result.initial_value
+    m     = result.metrics
+
+    # --- fan chart -------------------------------------------------------
+    # 5–95 band
+    fig.add_trace(go.Scatter(
+        x=days + days[::-1],
+        y=list(pct[95]) + list(pct[5])[::-1],
+        fill="toself",
+        fillcolor="rgba(55,138,221,0.10)",
+        line=dict(width=0),
+        name="5–95 percentile",
+        hoverinfo="skip",
+    ), row=1, col=1)
+
+    # 25–75 band
+    fig.add_trace(go.Scatter(
+        x=days + days[::-1],
+        y=list(pct[75]) + list(pct[25])[::-1],
+        fill="toself",
+        fillcolor="rgba(55,138,221,0.20)",
+        line=dict(width=0),
+        name="25–75 percentile",
+        hoverinfo="skip",
+    ), row=1, col=1)
+
+    # median
+    fig.add_trace(go.Scatter(
+        x=days, y=pct[50],
+        mode="lines",
+        line=dict(color="#378ADD", width=2.5),
+        name="Median",
+        hovertemplate="Day %{x}<br>Median: $%{y:,.0f}<extra></extra>",
+    ), row=1, col=1)
+
+    # 5th and 95th boundary lines
+    fig.add_trace(go.Scatter(
+        x=days, y=pct[5],
+        mode="lines",
+        line=dict(color="#E24B4A", width=1.2, dash="dot"),
+        name="5th percentile",
+        hovertemplate="Day %{x}<br>5th pct: $%{y:,.0f}<extra></extra>",
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=days, y=pct[95],
+        mode="lines",
+        line=dict(color="#1D9E75", width=1.2, dash="dot"),
+        name="95th percentile",
+        hovertemplate="Day %{x}<br>95th pct: $%{y:,.0f}<extra></extra>",
+    ), row=1, col=1)
+
+    # sample paths
+    if show_paths > 0:
+        cols = result.paths.columns[:show_paths]
+        for col in cols:
+            fig.add_trace(go.Scatter(
+                x=days, y=result.paths[col],
+                mode="lines",
+                line=dict(color="rgba(55,138,221,0.08)", width=0.6),
+                showlegend=False,
+                hoverinfo="skip",
+            ), row=1, col=1)
+
+    # initial value reference
+    fig.add_hline(
+        y=init, row=1, col=1,
+        line=dict(color="#888780", width=1, dash="dash"),
+        annotation=dict(
+            text=f"Start ${init:,.0f}",
+            font=dict(size=9, color="#888780"),
+        ),
+    )
+
+    # --- terminal distribution histogram ---------------------------------
+    final = result.final_values
+    var_val  = init * (1 + m["var_95"])
+    cvar_val = init * (1 + m["cvar_95"])
+
+    fig.add_trace(go.Histogram(
+        x=final,
+        nbinsx=60,
+        marker_color="#378ADD",
+        opacity=0.65,
+        name="Terminal value",
+        hovertemplate="$%{x:,.0f}<br>Count: %{y}<extra></extra>",
+    ), row=2, col=1)
+
+    # initial value line
+    fig.add_vline(
+        x=init, row=2, col=1,
+        line=dict(color="#888780", width=1.5, dash="dash"),
+        annotation=dict(text="Start", font=dict(size=9, color="#888780")),
+    )
+
+    # VaR line
+    fig.add_vline(
+        x=var_val, row=2, col=1,
+        line=dict(color="#E24B4A", width=1.5, dash="dot"),
+        annotation=dict(
+            text=f"VaR 95%<br>${var_val:,.0f}",
+            font=dict(size=9, color="#E24B4A"),
+        ),
+    )
+
+    # CVaR line
+    fig.add_vline(
+        x=cvar_val, row=2, col=1,
+        line=dict(color="#993556", width=1.5, dash="dot"),
+        annotation=dict(
+            text=f"CVaR 95%<br>${cvar_val:,.0f}",
+            font=dict(size=9, color="#993556"),
+            xanchor="right",
+        ),
+    )
+
+    # median line
+    fig.add_vline(
+        x=m["median_final"], row=2, col=1,
+        line=dict(color="#1D9E75", width=1.5),
+        annotation=dict(
+            text=f"Median<br>${m['median_final']:,.0f}",
+            font=dict(size=9, color="#1D9E75"),
+        ),
+    )
+
+    # --- metrics annotation ----------------------------------------------
+    ann = (
+        f"Median return: {m['median_return']:+.1%}<br>"
+        f"VaR 95%: {m['var_95']:+.1%}<br>"
+        f"CVaR 95%: {m['cvar_95']:+.1%}<br>"
+        f"Prob of gain: {m['prob_gain']:.0%}<br>"
+        f"Prob loss >10%: {m['prob_loss_10pct']:.0%}<br>"
+        f"Prob loss >20%: {m['prob_loss_20pct']:.0%}"
+    )
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.01, y=0.97,
+        text=ann, showarrow=False, align="left",
+        font=dict(size=10, color="#5F5E5A"),
+        bgcolor="rgba(255,255,255,0.8)",
+        bordercolor="#D3D1C7", borderwidth=0.5, borderpad=8,
+    )
+
+    # --- axes & layout ---------------------------------------------------
+    fig.update_yaxes(title_text="Portfolio value ($)", tickformat="$,.0f",
+                     row=1, col=1, gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+    fig.update_yaxes(title_text="Count", row=2, col=1,
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+    fig.update_xaxes(title_text="Trading days", row=1, col=1,
+                     gridcolor="#D3D1C7", tickfont=dict(size=9, color="#888780"))
+    fig.update_xaxes(title_text="Terminal value ($)", tickformat="$,.0f",
+                     row=2, col=1, gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+
+    _apply_layout(
+        fig,
+        title=f"Monte Carlo Simulation — {result.method}",
+        subtitle=(
+            f"{result.n_sims:,} paths  ·  {result.horizon}-day horizon  ·  "
+            f"fitted on {_period_label(result.period)}  ·  "
+            f"{'equal weight' if len(set(result.weights)) == 1 else 'custom weights'}"
+        ),
+    )
+    fig.update_layout(height=750, hovermode="x")
+    return fig
