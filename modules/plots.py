@@ -1401,3 +1401,222 @@ def monte_carlo(result, show_paths: int = 50) -> go.Figure:
     )
     fig.update_layout(height=750, hovermode="x")
     return fig
+
+
+# ---------------------------------------------------------------------------
+# 14. Weekly seasonality — bar chart + cumulative drift
+# ---------------------------------------------------------------------------
+
+def seasonality(
+    quant: QuantAnalytics,
+    symbol: str,
+    period: str = "10y",
+    granularity: str = "weekly",    # "weekly" | "monthly"
+    show_cumulative: bool = True,
+) -> go.Figure:
+    """
+    Seasonality study — average return per week (or month) across all years.
+
+    Bars are coloured green/red by sign. A cumulative drift line shows the
+    seasonal bias building across the year. Unreliable weeks (< 3 observations)
+    are shown with reduced opacity.
+
+    granularity : "weekly"  → 52 bars, one per ISO week
+                  "monthly" → 12 bars, one per calendar month
+    """
+    if granularity == "monthly":
+        stats  = quant.monthly_seasonality(symbol, period=period)
+        x_vals = list(stats.index)
+        x_title = "Month"
+    else:
+        stats  = quant.weekly_seasonality(symbol, period=period)
+        x_vals = [f"W{int(w):02d}" for w in stats.index]
+        x_title = "ISO week"
+
+    mean_ret   = stats["mean_return"].values
+    median_ret = stats["median_return"].values
+    win_rate   = stats["win_rate"].values
+    n_obs      = stats["n_obs"].values
+    cumul      = stats["cumulative"].values
+    reliable   = stats["reliable"].values
+
+    colors  = ["#1D9E75" if v >= 0 else "#E24B4A" for v in mean_ret]
+    opacity = [0.85 if r else 0.35 for r in reliable]
+
+    rows = 2 if show_cumulative else 1
+    fig  = make_subplots(
+        rows=rows, cols=1,
+        shared_xaxes=True,
+        row_heights=[0.62, 0.38] if show_cumulative else [1.0],
+        vertical_spacing=0.06,
+        subplot_titles=[
+            f"Mean {'weekly' if granularity=='weekly' else 'monthly'} return",
+            "Cumulative seasonal drift",
+        ] if show_cumulative else [
+            f"Mean {'weekly' if granularity=='weekly' else 'monthly'} return"
+        ],
+    )
+
+    # --- bar chart -------------------------------------------------------
+    for i, (x, y, c, op, wr, n) in enumerate(
+        zip(x_vals, mean_ret, colors, opacity, win_rate, n_obs)
+    ):
+        fig.add_trace(go.Bar(
+            x=[x], y=[y],
+            marker_color=c,
+            marker_opacity=op,
+            showlegend=False,
+            customdata=[[wr, n, median_ret[i]]],
+            hovertemplate=(
+                f"<b>{x}</b><br>"
+                "Mean return: %{y:.2%}<br>"
+                "Median: %{customdata[0][2]:.2%}<br>"
+                "Win rate: %{customdata[0][0]:.0%}<br>"
+                "Observations: %{customdata[0][1]:.0f}"
+                + ("" if reliable[i] else "<br><i>⚠ few observations</i>")
+                + "<extra></extra>"
+            ),
+        ), row=1, col=1)
+
+    # zero line
+    fig.add_hline(y=0, row=1, col=1,
+                  line=dict(color="#B4B2A9", width=0.8))
+
+    # win-rate dots overlay
+    fig.add_trace(go.Scatter(
+        x=x_vals, y=mean_ret,
+        mode="markers",
+        marker=dict(
+            size=6,
+            color=win_rate,
+            colorscale=[[0, "#E24B4A"], [0.5, "#F4F3EF"], [1, "#1D9E75"]],
+            cmin=0, cmax=1,
+            showscale=True,
+            colorbar=dict(
+                title="Win rate",
+                thickness=10, len=0.45, y=0.78,
+                tickformat=".0%",
+                tickfont=dict(size=9, color="#888780"),
+                outlinewidth=0,
+            ),
+            line=dict(color="white", width=1),
+        ),
+        showlegend=False,
+        hoverinfo="skip",
+    ), row=1, col=1)
+
+    # --- cumulative drift ------------------------------------------------
+    if show_cumulative:
+        fig.add_trace(go.Scatter(
+            x=x_vals, y=cumul,
+            mode="lines+markers",
+            line=dict(color="#378ADD", width=2),
+            marker=dict(size=4, color="#378ADD"),
+            fill="tozeroy",
+            fillcolor="rgba(55,138,221,0.08)",
+            name="Cumulative drift",
+            hovertemplate="%{x}<br>Cumulative: %{y:.2%}<extra></extra>",
+        ), row=2, col=1)
+
+        fig.add_hline(y=0, row=2, col=1,
+                      line=dict(color="#B4B2A9", width=0.8))
+
+        fig.update_yaxes(
+            tickformat=".1%", row=2, col=1,
+            gridcolor="#D3D1C7",
+            tickfont=dict(size=9, color="#888780"),
+        )
+        fig.update_xaxes(
+            title_text=x_title, row=2, col=1,
+            tickfont=dict(size=9, color="#888780"),
+            gridcolor="#D3D1C7",
+        )
+
+    fig.update_yaxes(
+        tickformat=".1%", row=1, col=1,
+        gridcolor="#D3D1C7",
+        tickfont=dict(size=9, color="#888780"),
+        title_text="Mean return",
+    )
+    fig.update_xaxes(
+        tickfont=dict(size=8 if granularity == "weekly" else 10, color="#888780"),
+        gridcolor="#D3D1C7", row=1, col=1,
+        tickangle=-45 if granularity == "weekly" else 0,
+    )
+
+    n_years = int(stats["n_obs"].median())
+    _apply_layout(
+        fig,
+        title=f"{symbol} — {granularity.capitalize()} seasonality",
+        subtitle=f"~{n_years} years of data  ·  period: {_period_label(period)}  ·  "
+                 f"green = positive avg  ·  dot colour = win rate",
+    )
+    fig.update_layout(height=550 if show_cumulative else 380, bargap=0.15)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 15. Seasonality heatmap — year × week
+# ---------------------------------------------------------------------------
+
+def seasonality_heatmap(
+    quant: QuantAnalytics,
+    symbol: str,
+    period: str = "10y",
+) -> go.Figure:
+    """
+    Year × week heatmap of weekly returns.
+
+    Rows   : calendar year
+    Columns: ISO week (1–52)
+    Colour : weekly return (red = negative, green = positive)
+
+    Lets you spot persistent seasonal patterns across individual years
+    and identify outlier years that broke the seasonal norm.
+    """
+    pivot = quant.seasonality_heatmap_data(symbol, period=period)
+
+    # symmetric colour scale around 0
+    abs_max = float(np.nanpercentile(np.abs(pivot.values), 95))
+
+    fig = go.Figure(go.Heatmap(
+        z=pivot.values,
+        x=[f"W{int(c):02d}" for c in pivot.columns],
+        y=[str(y) for y in pivot.index],
+        zmin=-abs_max,
+        zmax=abs_max,
+        colorscale=[
+            [0.0,  "#A32D2D"],
+            [0.35, "#F5C4B3"],
+            [0.5,  "#FAFAF9"],
+            [0.65, "#9FE1CB"],
+            [1.0,  "#0F6E56"],
+        ],
+        hovertemplate="<b>%{y}  %{x}</b><br>Return: %{z:.2%}<extra></extra>",
+        colorbar=dict(
+            title="Weekly return",
+            thickness=12,
+            tickformat=".1%",
+            tickfont=dict(size=9, color="#888780"),
+            outlinewidth=0,
+        ),
+    ))
+
+    n_years = len(pivot)
+    fig.update_xaxes(
+        tickfont=dict(size=8, color="#888780"),
+        tickangle=-45,
+        title_text="ISO week",
+    )
+    fig.update_yaxes(
+        tickfont=dict(size=10, color="#888780"),
+        title_text="Year",
+    )
+    _apply_layout(
+        fig,
+        title=f"{symbol} — Weekly return heatmap",
+        subtitle=f"{n_years} years  ·  period: {_period_label(period)}  ·  "
+                 f"green = positive  ·  red = negative",
+    )
+    fig.update_layout(height=max(350, n_years * 28 + 120))
+    return fig

@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from .stock_client import StockClient
+from classes.stock_client import StockClient
 
 
 class QuantAnalytics:
@@ -49,7 +49,7 @@ class QuantAnalytics:
         if not bars:
             raise ValueError(f"No history returned for '{symbol}' (period={period})")
         df = pd.DataFrame(bars)
-        df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+        df["date"] = pd.to_datetime(df["date"])
         return df.set_index("date")["adj_close"].sort_index().astype(float)
 
     def _prices_bulk(
@@ -578,3 +578,125 @@ class QuantAnalytics:
             "var_95_1d": self.var(symbol, period, confidence=0.95),
             "cvar_95_1d": self.cvar(symbol, period, confidence=0.95),
         }
+
+    # ------------------------------------------------------------------
+    # Seasonality
+    # ------------------------------------------------------------------
+
+    def weekly_seasonality(
+        self,
+        symbol: str,
+        period: str = "10y",
+        min_observations: int = 3,
+    ) -> pd.DataFrame:
+        """
+        Weekly seasonality study — mean return for each ISO week of the year.
+
+        For each of the 52 (or 53) weeks, aggregates all occurrences across
+        the available history and returns statistics per week.
+
+        Parameters
+        ----------
+        symbol           : ticker
+        period           : history window — "5y", "10y", "max" recommended
+        min_observations : weeks with fewer years of data are flagged (column
+                           "reliable" = False)
+
+        Returns
+        -------
+        DataFrame indexed by week number (1–52) with columns:
+          mean_return   : average weekly return across all years
+          median_return : median weekly return
+          std_return    : standard deviation of weekly returns
+          win_rate      : fraction of years where that week was positive
+          n_obs         : number of yearly observations for that week
+          reliable      : True when n_obs >= min_observations
+          cumulative    : cumulative sum of mean_return (shows seasonal drift)
+        """
+        # fetch daily adj-close and resample to weekly (Friday close)
+        prices = self._prices(symbol, period=period, interval="1d")
+        weekly = prices.resample("W-FRI").last().dropna()
+        weekly_returns = weekly.pct_change().dropna()
+
+        # tag each row with its ISO week number
+        df = weekly_returns.to_frame(name="return")
+        df["week"] = df.index.isocalendar().week.astype(int)
+        df["year"] = df.index.year
+
+        # aggregate per week number
+        grouped = df.groupby("week")["return"]
+        stats = pd.DataFrame({
+            "mean_return":   grouped.mean(),
+            "median_return": grouped.median(),
+            "std_return":    grouped.std(),
+            "win_rate":      grouped.apply(lambda x: (x > 0).mean()),
+            "n_obs":         grouped.count(),
+        })
+
+        stats["reliable"]   = stats["n_obs"] >= min_observations
+        stats["cumulative"] = stats["mean_return"].cumsum()
+        return stats
+
+    def monthly_seasonality(
+        self,
+        symbol: str,
+        period: str = "10y",
+        min_observations: int = 3,
+    ) -> pd.DataFrame:
+        """
+        Monthly seasonality — same as weekly_seasonality but at month granularity.
+
+        Returns a DataFrame indexed 1–12 with the same columns.
+        Useful as a higher-level complement to the weekly view.
+        """
+        prices = self._prices(symbol, period=period, interval="1d")
+        monthly = prices.resample("BME").last().dropna()
+        monthly_returns = monthly.pct_change().dropna()
+
+        df = monthly_returns.to_frame(name="return")
+        df["month"] = df.index.month
+
+        grouped = df.groupby("month")["return"]
+        stats = pd.DataFrame({
+            "mean_return":   grouped.mean(),
+            "median_return": grouped.median(),
+            "std_return":    grouped.std(),
+            "win_rate":      grouped.apply(lambda x: (x > 0).mean()),
+            "n_obs":         grouped.count(),
+        })
+        stats.index = pd.Index(
+            ["Jan","Feb","Mar","Apr","May","Jun",
+             "Jul","Aug","Sep","Oct","Nov","Dec"],
+            name="month"
+        )
+        stats["reliable"]   = stats["n_obs"] >= min_observations
+        stats["cumulative"] = stats["mean_return"].cumsum()
+        return stats
+
+    def seasonality_heatmap_data(
+        self,
+        symbol: str,
+        period: str = "10y",
+    ) -> pd.DataFrame:
+        """
+        Return a year × week matrix of weekly returns — ready for a heatmap.
+
+        Rows   : calendar year
+        Columns: ISO week number (1–52)
+        Values : weekly return (NaN where data is unavailable)
+        """
+        prices = self._prices(symbol, period=period, interval="1d")
+        weekly = prices.resample("W-FRI").last().dropna()
+        weekly_returns = weekly.pct_change().dropna()
+
+        df = weekly_returns.to_frame(name="return")
+        df["week"] = df.index.isocalendar().week.astype(int)
+        df["year"] = df.index.year
+
+        # pivot: rows=year, cols=week
+        pivot = df.pivot_table(
+            index="year", columns="week", values="return", aggfunc="first"
+        )
+        # keep only weeks 1–52
+        pivot = pivot[[c for c in range(1, 53) if c in pivot.columns]]
+        return pivot
