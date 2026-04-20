@@ -205,6 +205,11 @@ def run(
     # --- fetch prices ----------------------------------------------------
     prices = quant._prices_bulk(symbols, period=period)
     prices = prices.dropna(how="all").ffill()
+    # force a clean tz-naive date-only index regardless of yfinance version
+    prices.index = pd.to_datetime(
+        prices.index.strftime("%Y-%m-%d") if hasattr(prices.index, "strftime")
+        else prices.index
+    )
 
     # --- generate raw weights from strategy (full daily signal) ----------
     raw_weights = strategy(prices)

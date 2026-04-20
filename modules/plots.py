@@ -64,6 +64,15 @@ _LAYOUT = dict(
 )
 
 
+def _apply_date_layout(fig: go.Figure, title: str, subtitle: str = "") -> go.Figure:
+    """Like _apply_layout but forces type='date' on all x-axes after spreading
+    _LAYOUT — prevents the xaxis dict in _LAYOUT from resetting Plotly's
+    auto-detected axis type back to linear (which renders as 1970 epoch)."""
+    _apply_layout(fig, title, subtitle)
+    fig.update_xaxes(type="date", tickformat="%b %Y")
+    return fig
+
+
 def _apply_layout(fig: go.Figure, title: str, subtitle: str = "") -> go.Figure:
     full_title = f"<b>{title}</b>"
     if subtitle:
@@ -264,7 +273,7 @@ def cumulative_returns(
     fig.add_hline(y=base, line=dict(color="#B4B2A9", width=1, dash="dash"))
     fig.update_yaxes(title_text=f"Value (started at {base:.0f})")
     fig.update_xaxes(title_text="Date")
-    _apply_layout(fig, title=f"Cumulative returns — {_period_label(period)}")
+    _apply_date_layout(fig, title=f"Cumulative returns — {_period_label(period)}")
     return fig
 
 
@@ -309,7 +318,7 @@ def drawdown(
     fig.add_hline(y=0, line=dict(color="#B4B2A9", width=0.8))
     fig.update_yaxes(title_text="Drawdown", tickformat=".0%")
     fig.update_xaxes(title_text="Date")
-    _apply_layout(fig, title=f"Drawdown — {_period_label(period)}")
+    _apply_date_layout(fig, title=f"Drawdown — {_period_label(period)}")
     return fig
 
 
@@ -343,7 +352,7 @@ def rolling_volatility(
 
     fig.update_yaxes(title_text="Annualised volatility", tickformat=".0%")
     fig.update_xaxes(title_text="Date")
-    _apply_layout(fig,
+    _apply_date_layout(fig,
                   title=f"Rolling volatility — {_period_label(period)}",
                   subtitle=f"{window}-day window")
     return fig
@@ -384,7 +393,7 @@ def rolling_sharpe(
 
     fig.update_yaxes(title_text="Sharpe ratio")
     fig.update_xaxes(title_text="Date")
-    _apply_layout(fig,
+    _apply_date_layout(fig,
                   title=f"Rolling Sharpe — {_period_label(period)}",
                   subtitle=f"{window}-day window  ·  risk-free rate {risk_free_rate:.0%}")
     return fig
@@ -1102,9 +1111,16 @@ def backtest(result, show_drawdown: bool = True) -> go.Figure:
         vertical_spacing=0.04,
     )
 
+    def _safe_index(s):
+        """ISO date strings — unambiguous for Plotly."""
+        idx = s.index
+        if hasattr(idx, "tz") and idx.tz is not None:
+            idx = idx.tz_convert(None)
+        return pd.DatetimeIndex(idx).normalize().strftime("%Y-%m-%d").tolist()
+
     # --- equity curve ----------------------------------------------------
     fig.add_trace(go.Scatter(
-        x=result.equity_curve.index,
+        x=_safe_index(result.equity_curve),
         y=result.equity_curve.values,
         mode="lines",
         name=result.strategy_name,
@@ -1118,10 +1134,9 @@ def backtest(result, show_drawdown: bool = True) -> go.Figure:
     # --- benchmark equity curve ------------------------------------------
     if result.benchmark_result:
         bm = result.benchmark_result
-        # rescale benchmark to same starting capital
         bm_eq = bm.equity_curve * (result.initial_capital / bm.equity_curve.iloc[0])
         fig.add_trace(go.Scatter(
-            x=bm_eq.index,
+            x=_safe_index(bm_eq),
             y=bm_eq.values,
             mode="lines",
             name=bm.strategy_name,
@@ -1138,7 +1153,7 @@ def backtest(result, show_drawdown: bool = True) -> go.Figure:
         dd       = (result.equity_curve - roll_max) / roll_max
 
         fig.add_trace(go.Scatter(
-            x=dd.index, y=dd.values,
+            x=_safe_index(dd), y=dd.values,
             mode="lines",
             fill="tozeroy",
             fillcolor="rgba(226,75,74,0.15)",
@@ -1153,7 +1168,7 @@ def backtest(result, show_drawdown: bool = True) -> go.Figure:
             bm_max = bm_eq.cummax()
             bm_dd  = (bm_eq - bm_max) / bm_max
             fig.add_trace(go.Scatter(
-                x=bm_dd.index, y=bm_dd.values,
+                x=_safe_index(bm_dd), y=bm_dd.values,
                 mode="lines",
                 line=dict(color=_PALETTE[2], width=1, dash="dot"),
                 name=f"{bm.strategy_name} DD",
@@ -1187,7 +1202,7 @@ def backtest(result, show_drawdown: bool = True) -> go.Figure:
         font=dict(size=10, color="#5F5E5A"),
         bgcolor="rgba(255,255,255,0.7)",
         bordercolor="#D3D1C7", borderwidth=0.5,
-        borderpad=8, row=1, col=1,
+        borderpad=8,
     )
 
     # --- styling ---------------------------------------------------------
@@ -1195,24 +1210,15 @@ def backtest(result, show_drawdown: bool = True) -> go.Figure:
                      row=1, col=1,
                      tickfont=dict(size=9, color="#888780"),
                      gridcolor="#D3D1C7", zerolinecolor="#B4B2A9")
-    fig.update_xaxes(tickfont=dict(size=9, color="#888780"),
-                     gridcolor="#D3D1C7")
-    fig.update_layout(
-        **_LAYOUT,
-        title=dict(
-            text=f"<b>Backtest — {result.strategy_name}</b>"
-                 f"<br><sup style='color:#888780'>period: {_period_label(result.period)}"
-                 f"  ·  rebalance embedded in positions</sup>",
-            font=dict(size=15, color="#2C2C2A"), x=0.02,
-        ),
-        hovermode="x unified",
+
+    _apply_date_layout(
+        fig,
+        title=f"Backtest — {result.strategy_name}",
+        subtitle=f"period: {_period_label(result.period)}",
     )
+    fig.update_layout(hovermode="x unified")
     return fig
 
-
-# ---------------------------------------------------------------------------
-# 13. Monte Carlo — fan chart + terminal value histogram
-# ---------------------------------------------------------------------------
 
 def monte_carlo(result, show_paths: int = 50) -> go.Figure:
     """
@@ -1390,7 +1396,7 @@ def monte_carlo(result, show_paths: int = 50) -> go.Figure:
                      row=2, col=1, gridcolor="#D3D1C7",
                      tickfont=dict(size=9, color="#888780"))
 
-    _apply_layout(
+    _apply_date_layout(
         fig,
         title=f"Monte Carlo Simulation — {result.method}",
         subtitle=(
@@ -1545,7 +1551,7 @@ def seasonality(
     )
 
     n_years = int(stats["n_obs"].median())
-    _apply_layout(
+    _apply_date_layout(
         fig,
         title=f"{symbol} — {granularity.capitalize()} seasonality",
         subtitle=f"~{n_years} years of data  ·  period: {_period_label(period)}  ·  "
@@ -1612,7 +1618,7 @@ def seasonality_heatmap(
         tickfont=dict(size=10, color="#888780"),
         title_text="Year",
     )
-    _apply_layout(
+    _apply_date_layout(
         fig,
         title=f"{symbol} — Weekly return heatmap",
         subtitle=f"{n_years} years  ·  period: {_period_label(period)}  ·  "
@@ -1819,7 +1825,7 @@ def seasonality_comparison(
         zerolinecolor="#B4B2A9",
     )
 
-    _apply_layout(
+    _apply_date_layout(
         fig,
         title=f"{symbol} — Seasonality comparison",
         subtitle=(
@@ -1987,7 +1993,7 @@ def seasonality_comparison_clean(
         range=[y_min, y_max],
     )
 
-    _apply_layout(
+    _apply_date_layout(
         fig,
         title=f"{symbol} — Seasonality",
         subtitle=f"{current_year} vs {' / '.join(periods_to_plot)} historical averages",
