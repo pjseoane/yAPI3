@@ -576,7 +576,7 @@ def auto_report(
     author: str = "",
     period: str = "1y",
     benchmark: str = "SPY",
-    risk_free_rate: float = 0.05,
+    risk_free_rate: float = 0.01,
     include_backtest: bool = True,
     include_frontier: bool = True,
     include_fundamentals: bool = True,

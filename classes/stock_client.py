@@ -213,7 +213,13 @@ class StockClient:
     # Historical price data
     # ------------------------------------------------------------------
 
-    @_cached("history", "ttl_history")
+    # Period ordering — larger rank = longer history
+    _PERIOD_RANK: dict = {
+        "1d": 0, "5d": 1, "1mo": 2, "3mo": 3, "6mo": 4,
+        "1y": 5, "2y": 6, "3y": 7, "5y": 8, "10y": 9,
+        "ytd": 4, "max": 99,
+    }
+
     def get_history(
         self,
         symbol: str,
@@ -224,28 +230,48 @@ class StockClient:
         """
         Return OHLCV bars.
 
-        period   : 1d 5d 1mo 3mo 6mo 1y 2y 5y 10y ytd max
+        period   : 1d 5d 1mo 3mo 6mo 1y 2y 3y 5y 10y ytd max
         interval : 1m 2m 5m 15m 30m 60m 90m 1h 1d 5d 1wk 1mo 3mo
-        adjusted : True  -> close key is Adj Close (split + dividend adjusted).
-                            Use this for return / volatility / beta calculations.
-                   False -> close key is the raw unadjusted close price.
-                            Use this for charting actual traded prices.
+        adjusted : True  -> adj_close (split + dividend adjusted). Default.
+                   False -> raw close (actual traded price).
 
-        The returned dicts include an "adjusted" boolean so callers always know
-        which price type they received.
-
-        Note: yfinance applies adjustments retroactively, so the most recent
-        bar's close and adj_close are always identical regardless of this flag.
+        Cache behaviour
+        ---------------
+        If a longer period for the same symbol/interval/adjusted combination
+        is already cached, the result is sliced from it — no extra fetch.
+        Requesting "2y" after "5y" costs zero API calls.
         """
+        requested_rank = self._PERIOD_RANK.get(period, -1)
+
+        # check if a longer cached period already covers this request
+        for cached_period, rank in sorted(
+            self._PERIOD_RANK.items(), key=lambda x: x[1], reverse=True
+        ):
+            if rank <= requested_rank:
+                break
+            ck = self._cache._make_key("history", symbol, cached_period, interval, adjusted)
+            hit, cached_data = self._cache.get(ck)
+            if hit and cached_data:
+                sliced = self._slice_to_period(cached_data, period)
+                if sliced:
+                    return sliced
+
+        # normal cache check for exact period
+        ck = self._cache._make_key("history", symbol, period, interval, adjusted)
+        hit, cached_data = self._cache.get(ck)
+        if hit:
+            return cached_data
+
+        # fetch from yfinance
         df = self._ticker(symbol).history(
             period=period, interval=interval, auto_adjust=adjusted
         )
         if df is None or df.empty:
             return []
         df = df.reset_index()
-        date_col = "Datetime" if "Datetime" in df.columns else "Date"
+        date_col    = "Datetime" if "Datetime" in df.columns else "Date"
         close_label = "adj_close" if adjusted else "close"
-        return (
+        result = (
             df[[date_col, "Open", "High", "Low", "Close", "Volume"]]
             .rename(columns={
                 date_col: "date",
@@ -258,6 +284,31 @@ class StockClient:
             .assign(adjusted=adjusted)
             .to_dict(orient="records")
         )
+        self._cache.set(ck, result, ttl=self.ttl_history)
+        return result
+
+    @staticmethod
+    def _slice_to_period(data: list, period: str) -> list:
+        """Slice cached data to approximately cover *period* from the most recent bar."""
+        from datetime import datetime, timedelta
+
+        _period_days = {
+            "1d": 1, "5d": 5, "1mo": 30, "3mo": 91, "6mo": 182,
+            "1y": 365, "2y": 730, "3y": 1095, "5y": 1825,
+            "10y": 3650, "ytd": 365, "max": 999_999,
+        }
+        n_days = _period_days.get(period, 365)
+        if not data:
+            return data
+
+        def _parse(d):
+            if isinstance(d, datetime):
+                return d.replace(tzinfo=None) if d.tzinfo else d
+            return datetime.fromisoformat(str(d).split("+")[0].split("T")[0])
+
+        last_date = _parse(data[-1]["date"])
+        cutoff    = last_date - timedelta(days=n_days)
+        return [row for row in data if _parse(row["date"]) >= cutoff]
 
     # ------------------------------------------------------------------
     # News
