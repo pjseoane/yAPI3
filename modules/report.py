@@ -576,13 +576,15 @@ def auto_report(
     author: str = "",
     period: str = "1y",
     benchmark: str = "SPY",
-    risk_free_rate: float = 0.01,
+    risk_free_rate: float = 0.05,
     include_backtest: bool = True,
     include_frontier: bool = True,
     include_fundamentals: bool = True,
     include_montecarlo: bool = True,
     mc_horizon: int = 252,
     mc_sims: int = 1000,
+    include_factors: bool = True,
+    factor_model: str = "ff5",
 ) -> QuantReport:
     """
     Build a full report automatically from symbols.
@@ -599,6 +601,7 @@ def auto_report(
     8. Portfolio Optimisation — efficient frontier (if include_frontier)
     9. Backtest               — MA crossover vs benchmark (if include_backtest)
     10. Monte Carlo           — fan chart + terminal distribution (if include_montecarlo)
+    11. Factor Exposure       — FF5 loadings + rolling betas (if include_factors)
     """
     import modules.plots as plots
     import modules.portfolio as portfolio
@@ -818,5 +821,32 @@ def auto_report(
                 r.add_plot(plots.monte_carlo(mc, show_paths=30))
             except Exception as e:
                 r.add_text(f"<i>Monte Carlo ({mc_method}) unavailable: {e}</i>")
+
+
+    if include_factors:
+        import modules.factors as factors
+        r.add_section("Factor Exposure")
+        r.add_text(
+            f"Fama-French <b>{factor_model.upper()}</b> factor regression. "
+            "Solid bars = significant (p<0.05). Error bars = ±1 SE. "
+            "Rolling betas show how factor exposures shift over time."
+        )
+        for sym in symbols:
+            try:
+                fr = factors.run(quant, sym, model=factor_model, period=period)
+                r.add_plot(plots.factor_exposure(fr))
+            except Exception as e:
+                r.add_text(f"<i>Factor exposure for {sym} unavailable: {e}</i>")
+        try:
+            results = []
+            for sym in symbols:
+                try:
+                    results.append(factors.run(quant, sym, model=factor_model, period=period))
+                except Exception:
+                    pass
+            if len(results) > 1:
+                r.add_plot(plots.factor_comparison(results))
+        except Exception as e:
+            r.add_text(f"<i>Factor comparison unavailable: {e}</i>")
 
     return r
