@@ -580,6 +580,221 @@ class QuantAnalytics:
         }
 
     # ------------------------------------------------------------------
+    # Monte Carlo simulation
+    # ------------------------------------------------------------------
+
+    def monte_carlo(
+        self,
+        symbol: str,
+        horizon_years: float = 2.0,
+        n_sims: int = 10_000,
+        target_gain: float = 0.30,
+        max_drawdown_limit: float = 0.25,
+        history_period: str = "2y",
+        drift_override: float | None = None,
+        volatility_override: float | None = None,
+        seed: int | None = None,
+        return_paths: bool = False,
+        n_sample_paths: int = 200,
+    ) -> dict:
+        """
+        Geometric Brownian Motion Monte Carlo for a single symbol.
+
+        Drift (μ) and volatility (σ) are estimated from *history_period*
+        of real price data fetched through the StockClient cache.  Both
+        can be overridden for scenario analysis.
+
+        Parameters
+        ----------
+        symbol               : ticker to simulate
+        horizon_years        : simulation horizon in years (default 2)
+        n_sims               : number of Monte Carlo paths (default 10 000)
+        target_gain          : minimum total return to count as a win,
+                               e.g. 0.30 = +30 % (default 0.30)
+        max_drawdown_limit   : maximum tolerated peak-to-trough drawdown,
+                               e.g. 0.25 = 25 % (default 0.25)
+        history_period       : yfinance period used to calibrate μ and σ
+                               (default "2y")
+        drift_override       : annualised drift to use instead of historical
+                               (e.g. 0.15 for +15 %)
+        volatility_override  : annualised vol to use instead of historical
+                               (e.g. 0.35 for 35 %)
+        seed                 : random seed for reproducibility (default None)
+        return_paths         : if True, include *n_sample_paths* simulated
+                               price paths in the result (memory-intensive
+                               for large n_sims — keep n_sample_paths small)
+        n_sample_paths       : number of paths to store when return_paths=True
+
+        Returns
+        -------
+        dict with keys:
+          symbol                : ticker
+          entry_price           : last closing price used as starting point
+          horizon_years         : as supplied
+          n_sims                : as supplied
+          mu_annual             : annualised drift used in simulation
+          sigma_annual          : annualised volatility used in simulation
+          target_gain           : as supplied (fraction)
+          max_drawdown_limit    : as supplied (fraction)
+          prob_gain             : P(final return >= target_gain)
+          prob_drawdown_ok      : P(max drawdown <= max_drawdown_limit)
+          prob_both             : P(gain AND drawdown constraint both met) ← key metric
+          prob_loss             : P(final return < 0)
+          median_return         : 50th-percentile final total return
+          percentile_10         : 10th-percentile final total return
+          percentile_90         : 90th-percentile final total return
+          expected_return       : mean final total return across all paths
+          paths                 : list of lists (only present if return_paths=True)
+                                  each sub-list is a normalised price path (1.0 = entry)
+
+        Examples
+        --------
+        >>> qa = QuantAnalytics(client)
+        >>> result = qa.monte_carlo("NFLX")
+        >>> print(f"Odds of both targets: {result['prob_both']:.1%}")
+        Odds of both targets: 23.4%
+
+        >>> # Scenario: lower vol assumption
+        >>> result = qa.monte_carlo("NFLX", volatility_override=0.25)
+
+        >>> # Get paths for plotting
+        >>> result = qa.monte_carlo("NFLX", return_paths=True, n_sample_paths=500)
+        >>> paths_df = pd.DataFrame(result["paths"]).T   # shape: steps × n_sample_paths
+        """
+        rng = np.random.default_rng(seed)
+
+        # ── calibrate μ and σ from real data ──────────────────────────────
+        prices = self._prices(symbol, period=history_period)
+        entry_price = float(prices.iloc[-1])
+
+        log_rets = self._log_returns(prices)
+
+        if volatility_override is not None:
+            sigma = float(volatility_override)
+        else:
+            sigma = float(log_rets.std() * np.sqrt(self.trading_days))
+
+        if drift_override is not None:
+            mu = float(drift_override)
+        else:
+            # annualise the mean log return; note: E[log r] ≠ E[r], so this is
+            # the log-space drift — appropriate for GBM
+            mu = float(log_rets.mean() * self.trading_days)
+
+        # ── GBM parameters ────────────────────────────────────────────────
+        n_steps = int(round(horizon_years * self.trading_days))
+        dt = 1.0 / self.trading_days
+        drift = (mu - 0.5 * sigma ** 2) * dt        # per-step drift
+        vol   = sigma * np.sqrt(dt)                  # per-step vol
+
+        # ── simulate all paths at once (vectorised) ───────────────────────
+        # shape: (n_steps, n_sims)
+        z = rng.standard_normal((n_steps, n_sims))
+        log_returns_matrix = drift + vol * z         # daily log increments
+        # cumulative log return up to each step → shape (n_steps, n_sims)
+        cum_log = np.cumsum(log_returns_matrix, axis=0)
+        # prepend row of zeros (t=0, price = entry)
+        cum_log = np.vstack([np.zeros((1, n_sims)), cum_log])
+        price_paths = entry_price * np.exp(cum_log)  # shape: (n_steps+1, n_sims)
+
+        # ── compute final returns ─────────────────────────────────────────
+        final_prices  = price_paths[-1, :]
+        final_returns = (final_prices - entry_price) / entry_price
+
+        # ── compute max drawdown per path ─────────────────────────────────
+        # running peak for each path across time steps
+        running_peak = np.maximum.accumulate(price_paths, axis=0)
+        drawdowns    = (price_paths - running_peak) / running_peak  # ≤ 0
+        max_drawdown_per_path = np.abs(drawdowns.min(axis=0))       # positive
+
+        # ── probability calculations ──────────────────────────────────────
+        gain_ok = final_returns >= target_gain
+        dd_ok   = max_drawdown_per_path <= max_drawdown_limit
+        both_ok = gain_ok & dd_ok
+
+        prob_gain        = float(gain_ok.mean())
+        prob_drawdown_ok = float(dd_ok.mean())
+        prob_both        = float(both_ok.mean())
+        prob_loss        = float((final_returns < 0).mean())
+
+        # ── distribution stats ────────────────────────────────────────────
+        median_return   = float(np.median(final_returns))
+        pct_10          = float(np.percentile(final_returns, 10))
+        pct_90          = float(np.percentile(final_returns, 90))
+        expected_return = float(final_returns.mean())
+
+        result = {
+            "symbol":             symbol,
+            "entry_price":        entry_price,
+            "horizon_years":      horizon_years,
+            "n_sims":             n_sims,
+            "mu_annual":          mu,
+            "sigma_annual":       sigma,
+            "target_gain":        target_gain,
+            "max_drawdown_limit": max_drawdown_limit,
+            "prob_gain":          prob_gain,
+            "prob_drawdown_ok":   prob_drawdown_ok,
+            "prob_both":          prob_both,
+            "prob_loss":          prob_loss,
+            "median_return":      median_return,
+            "percentile_10":      pct_10,
+            "percentile_90":      pct_90,
+            "expected_return":    expected_return,
+        }
+
+        if return_paths:
+            # normalise paths to 1.0 = entry price; store as list of lists
+            # each element is one path (length = n_steps + 1)
+            idx = rng.choice(n_sims, size=min(n_sample_paths, n_sims), replace=False)
+            sample = price_paths[:, idx] / entry_price   # shape: (steps+1, n_sample_paths)
+            result["paths"] = sample.T.tolist()           # list of n_sample_paths lists
+
+        return result
+
+    def monte_carlo_bulk(
+        self,
+        symbols: list[str],
+        horizon_years: float = 2.0,
+        n_sims: int = 10_000,
+        target_gain: float = 0.30,
+        max_drawdown_limit: float = 0.25,
+        history_period: str = "2y",
+        seed: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Run monte_carlo() for multiple symbols and return a comparison DataFrame.
+
+        Returns a DataFrame with one column per symbol and these index rows:
+          entry_price, mu_annual, sigma_annual, prob_gain,
+          prob_drawdown_ok, prob_both, prob_loss,
+          median_return, percentile_10, percentile_90, expected_return
+
+        Example
+        -------
+        >>> df = qa.monte_carlo_bulk(["NFLX", "AAPL", "MSFT"])
+        >>> print(df.loc["prob_both"])
+        NFLX    0.234
+        AAPL    0.318
+        MSFT    0.291
+        """
+        records = {}
+        for i, sym in enumerate(symbols):
+            # increment seed per symbol so runs are independent but reproducible
+            sym_seed = None if seed is None else seed + i
+            r = self.monte_carlo(
+                sym,
+                horizon_years=horizon_years,
+                n_sims=n_sims,
+                target_gain=target_gain,
+                max_drawdown_limit=max_drawdown_limit,
+                history_period=history_period,
+                seed=sym_seed,
+                return_paths=False,
+            )
+            records[sym] = {k: v for k, v in r.items() if k not in ("symbol", "paths")}
+        return pd.DataFrame(records)
+
+    # ------------------------------------------------------------------
     # Seasonality
     # ------------------------------------------------------------------
 
