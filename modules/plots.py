@@ -1578,10 +1578,35 @@ def seasonality_heatmap(
     Columns: ISO week (1–52)
     Colour : weekly return (red = negative, green = positive)
 
+    Supports any "Ny" period string (e.g. "20y") — internally fetches
+    "max" and filters to the last N years, same as seasonality_comparison.
+
     Lets you spot persistent seasonal patterns across individual years
     and identify outlier years that broke the seasonal norm.
     """
-    pivot = quant.seasonality_heatmap_data(symbol, period=period)
+    # weekly_seasonality returns (week × year) — transpose to (year × week)
+    # handles arbitrary "Ny" periods via "max" fallback in weekly_seasonality
+    import datetime
+    current_year = datetime.date.today().year
+
+    if period.endswith("y") and period[:-1].isdigit():
+        n_years      = int(period[:-1])
+        fetch_period = "max" if n_years > 10 else period
+    else:
+        n_years      = None
+        fetch_period = period
+
+    pivot_wk_yr = quant.weekly_seasonality(symbol, period=fetch_period)
+
+    # filter to requested year range
+    all_years = sorted(pivot_wk_yr.columns.tolist())
+    if n_years is not None:
+        all_years = all_years[-n_years:]
+
+    pivot_wk_yr = pivot_wk_yr[all_years]
+
+    # transpose → rows=year, cols=week
+    pivot = pivot_wk_yr.T
 
     # symmetric colour scale around 0
     abs_max = float(np.nanpercentile(np.abs(pivot.values), 95))
@@ -1636,185 +1661,190 @@ def seasonality_heatmap(
 def seasonality_comparison(
     quant: QuantAnalytics,
     symbol: str,
+    long_term: str = "10y",
+    short_term: str = "5y",
     extra_periods: list[str] | None = None,
 ) -> go.Figure:
     """
-    Overlay current year's cumulative weekly return against historical averages.
+    Seasonality comparison with ±1σ band on the long-term average.
 
-    Always shows:
-      - 10-year average seasonal path
-      - 5-year average seasonal path
-      - Current year actual path (week by week as it unfolds)
+    Same logic as seasonality_comparison_clean() but adds a shaded band
+    showing the standard deviation of historical cumulative paths around
+    the long-term average.
 
-    extra_periods : optional list of additional historical windows to overlay,
-                    e.g. ["3y", "2y"]. Each becomes its own average line.
+    Parameters
+    ----------
+    long_term     : longer reference window — gray dotted  (default "10y")
+    short_term    : shorter reference window — blue dashed (default "5y")
+    extra_periods : additional windows, e.g. ["3y", "2y"]
 
-    X-axis : ISO week number (1–52)
-    Y-axis : cumulative return from week 1 of each period (all start at 0)
-
-    Reading the chart
-    -----------------
-    - Current year line above the averages → outperforming seasonal norm
-    - Current year line below             → underperforming
-    - Divergence widening late in the year → trend breaking from seasonality
+    Supports any "Ny" period (e.g. "20y", "15y") — fetches "max" data
+    and filters to the last N complete years.
     """
     import datetime
 
-    periods_to_plot = ["10y", "5y"] + (extra_periods or [])
-    current_year    = datetime.date.today().year
+    current_year = datetime.date.today().year
 
-    # --- fetch and build weekly returns for each historical period -------
-    def _weekly_cumulative_mean(period: str) -> tuple[pd.Series, pd.Series]:
-        """Mean cumulative return per ISO week across all years in period."""
-        pivot      = quant.weekly_seasonality(symbol, period=period)
-        hist_cols  = [c for c in pivot.columns if c != current_year]
-        mean_rets  = pivot[hist_cols].mean(axis=1)
-        # reindex to all 52 weeks and fill gaps with 0 so cumsum never
-        # encounters NaN — early weeks are missing when period starts mid-year
-        mean_rets  = mean_rets.reindex(range(1, 53), fill_value=0.0)
-        cumul      = mean_rets.cumsum()
-        cumul      = pd.concat([pd.Series([0.0], index=[0]), cumul])
-        cumul.index = list(range(len(cumul)))
-        return cumul, mean_rets
+    periods_to_plot = [long_term, short_term] + (extra_periods or [])
+    seen = set()
+    periods_to_plot = [p for p in periods_to_plot
+                       if not (p in seen or seen.add(p))]
 
-    # --- fetch current year actual weekly returns ------------------------
-    def _current_year_cumulative() -> tuple[pd.Series, list[int]]:
-        """Actual cumulative return for the current year, week by week."""
-        prices = quant._prices(symbol, period="1y", interval="1d")
-        cy_prices = prices[prices.index.year == current_year]
-        if cy_prices.empty:
-            return pd.Series(dtype=float), []
-        weekly = cy_prices.resample("W-FRI").last().dropna()
-        weekly_rets = weekly.pct_change().dropna()
-        # strftime avoids tz-aware isocalendar() alignment issues
-        weeks = weekly_rets.index.strftime("%V").astype(int).tolist()
-        cumul_vals = [0.0] + list((1 + weekly_rets).cumprod() - 1)
-        weeks_x    = [0] + weeks
-        return pd.Series(cumul_vals, index=weeks_x), weeks
+    # ── helper: per-year cumret pivot ──────────────────────────────────────
+    def _get_hist(period: str):
+        """Return hist DataFrame (week × year) and n_years used."""
+        if period.endswith("y") and period[:-1].isdigit():
+            n_years      = int(period[:-1])
+            fetch_period = "max" if n_years > 10 else period
+        else:
+            n_years      = None
+            fetch_period = period
 
-    # --- colour palette for historical lines -----------------------------
-    hist_colors = {
-        "10y": "#B4B2A9",   # gray
-        "5y":  "#378ADD",   # blue
-        "3y":  "#BA7517",   # amber
-        "2y":  "#534AB7",   # purple
-    }
-    hist_dash = {
-        "10y": "dot",
-        "5y":  "dash",
-        "3y":  "dashdot",
-        "2y":  "longdash",
-    }
+        pivot     = quant.weekly_seasonality(symbol, period=fetch_period)
+        hist_cols = sorted([c for c in pivot.columns if c != current_year])
+        if n_years is not None:
+            hist_cols = hist_cols[-n_years:]
+        return pivot[hist_cols]
 
-    fig = go.Figure()
+    def _col_cumret(col):
+        valid = col.dropna()
+        if valid.empty:
+            return pd.Series(dtype=float)
+        return ((1 + valid).cumprod() - 1).reindex(range(1, 53))
 
-    # --- historical average lines ----------------------------------------
-    all_cumsums = []
-    for period in periods_to_plot:
+    def _avg_cumret(period: str) -> tuple[pd.Series, pd.Series | None]:
+        """Return (mean_cumret, std_cumret) across all historical years."""
+        hist   = _get_hist(period)
+        if hist.empty:
+            return pd.Series(dtype=float), None
+        cum_df = hist.apply(_col_cumret)
+        avg    = cum_df.mean(axis=1, skipna=True).reindex(range(1, 53))
+        std    = cum_df.std(axis=1, skipna=True).reindex(range(1, 53))
+        return avg, std
+
+    # ── helper: current year ───────────────────────────────────────────────
+    def _current_year_cumret() -> tuple[pd.Series, int]:
+        pivot = quant.weekly_seasonality(symbol, period="1y")
+        if current_year not in pivot.columns:
+            return pd.Series(dtype=float), 0
+        cy       = pivot[current_year].dropna()
+        if cy.empty:
+            return pd.Series(dtype=float), 0
+        cumret   = (1 + cy).cumprod() - 1
+        return cumret, int(cy.index[-1])
+
+    def _to_xy(s: pd.Series) -> tuple[list, list]:
+        s = s.dropna()
+        return [0] + s.index.tolist(), [0.0] + s.tolist()
+
+    # ── styles ─────────────────────────────────────────────────────────────
+    _extra_colors = ["#BA7517", "#534AB7", "#D85A30", "#A32D2D"]
+    _extra_dashes = ["dashdot", "longdash", "dot", "dash"]
+
+    def _style(period, idx):
+        if period == long_term:
+            return "#B4B2A9", "dot"
+        if period == short_term:
+            return "#378ADD", "dash"
+        ei = (idx - 2) % len(_extra_colors)
+        return _extra_colors[ei], _extra_dashes[ei]
+
+    # ── plot ───────────────────────────────────────────────────────────────
+    fig      = go.Figure()
+    all_y    = [0.0]
+    hist_avgs = {}
+
+    for i, period in enumerate(periods_to_plot):
         try:
-            cumul, mean_rets = _weekly_cumulative_mean(period)
-            all_cumsums.extend(cumul.values.tolist())
-            color = hist_colors.get(period, "#888780")
-            dash  = hist_dash.get(period, "dot")
+            avg, std = _avg_cumret(period)
+            color, dash = _style(period, i)
+            x, y = _to_xy(avg)
+            all_y.extend(y)
 
-            # confidence band for 10y (± 1 std of cumulative paths)
-            if period == "10y":
-                pivot10   = quant.weekly_seasonality(symbol, period="10y")
-                hist_cols10 = [c for c in pivot10.columns if c != current_year]
-                std_ret10   = pivot10[hist_cols10].std(axis=1).reindex(range(1, 53), fill_value=0.0)
-                std_cumul   = std_ret10.cumsum()
-                std_cumul = pd.concat([pd.Series([0.0], index=[0]), std_cumul])
-                upper = cumul + std_cumul.values
-                lower = cumul - std_cumul.values
-                x_band = list(range(len(cumul)))
-
+            # ±1σ band for the long-term period only
+            if period == long_term and std is not None:
+                upper = (avg + std).reindex(range(1, 53))
+                lower = (avg - std).reindex(range(1, 53))
+                xu, yu = _to_xy(upper)
+                xl, yl = _to_xy(lower)
                 fig.add_trace(go.Scatter(
-                    x=x_band + x_band[::-1],
-                    y=list(upper) + list(lower)[::-1],
+                    x=xu + xl[::-1],
+                    y=yu + yl[::-1],
                     fill="toself",
                     fillcolor="rgba(180,178,169,0.12)",
                     line=dict(width=0),
                     showlegend=False,
                     hoverinfo="skip",
-                    name="10y ±1σ band",
                 ))
+                all_y.extend(yu + yl)
 
             fig.add_trace(go.Scatter(
-                x=list(range(len(cumul))),
-                y=cumul.values,
+                x=x, y=y,
                 mode="lines",
                 name=f"{period} avg",
                 line=dict(color=color, width=2, dash=dash),
                 hovertemplate=(
-                    f"<b>{period} average</b><br>"
-                    "Week %{x}<br>"
-                    "Cumulative: %{y:.2%}<extra></extra>"
+                    f"<b>{period} avg</b><br>"
+                    "Week %{x}<br>Cumulative: %{y:.2%}<extra></extra>"
                 ),
             ))
+            hist_avgs[period] = dict(zip(x, y))
         except Exception as e:
             print(f"Skipping {period}: {e}")
 
-    # --- current year line -----------------------------------------------
-    cy_cumul, cy_weeks = _current_year_cumulative()
-    if not cy_cumul.empty:
-        all_cumsums.extend(cy_cumul.values.tolist())
-        last_week = cy_weeks[-1] if cy_weeks else 0
+    # current year
+    cy_cumret, last_week = _current_year_cumret()
+    if not cy_cumret.empty:
+        x_cy = [0] + cy_cumret.index.tolist()
+        y_cy = [0.0] + cy_cumret.tolist()
+        all_y.extend(y_cy)
 
         fig.add_trace(go.Scatter(
-            x=list(cy_cumul.index),
-            y=cy_cumul.values,
+            x=x_cy, y=y_cy,
             mode="lines+markers",
-            name=f"{current_year} (actual)",
+            name=str(current_year),
             line=dict(color="#1D9E75", width=2.5),
-            marker=dict(size=5, color="#1D9E75"),
+            marker=dict(size=5, color="#1D9E75",
+                        line=dict(color="white", width=1)),
             hovertemplate=(
                 f"<b>{current_year}</b><br>"
-                "Week %{x}<br>"
-                "Cumulative: %{y:.2%}<extra></extra>"
+                "Week %{x}<br>Cumulative: %{y:.2%}<extra></extra>"
             ),
         ))
 
-        # vertical marker at "today" (last available week)
         fig.add_vline(
             x=last_week,
-            line=dict(color="#1D9E75", width=1, dash="dot"),
-            annotation=dict(
-                text=f"now (W{last_week:02d})",
-                font=dict(size=9, color="#1D9E75"),
-                bgcolor="rgba(255,255,255,0.7)",
-            ),
+            line=dict(color="#D3D1C7", width=1, dash="dot"),
+            annotation=dict(text=f"W{last_week:02d}",
+                            font=dict(size=9, color="#888780")),
         )
 
-        # performance vs each historical average at current week
-        ann_lines = [f"<b>{current_year} vs averages at W{last_week:02d}</b>"]
-        cy_now = float(cy_cumul.iloc[-1])
-        for period in periods_to_plot:
-            try:
-                cumul, _ = _weekly_cumulative_mean(period)
-                hist_now = float(cumul.iloc[min(last_week, len(cumul)-1)])
-                diff = cy_now - hist_now
-                sign = "▲" if diff >= 0 else "▼"
-                color_tag = "#1D9E75" if diff >= 0 else "#E24B4A"
-                ann_lines.append(
-                    f"vs {period}: <span style='color:{color_tag}'>"
-                    f"{sign} {diff:+.2%}</span>"
-                )
-            except Exception:
-                pass
-
+        cy_now    = float(y_cy[-1])
+        ann_lines = [f"<b>{current_year} at W{last_week:02d}: {cy_now:+.2%}</b>"]
+        for period, avg_dict in hist_avgs.items():
+            hist_now = avg_dict.get(last_week,
+                       avg_dict.get(max(avg_dict.keys()), 0))
+            diff     = cy_now - hist_now
+            arrow    = "▲" if diff >= 0 else "▼"
+            clr      = "#0F6E56" if diff >= 0 else "#A32D2D"
+            ann_lines.append(
+                f"vs {period}: <span style=\'color:{clr}\'>{arrow} {diff:+.2%}</span>"
+            )
         fig.add_annotation(
-            xref="paper", yref="paper", x=0.01, y=0.99,
+            xref="paper", yref="paper", x=0.01, y=0.97,
             text="<br>".join(ann_lines),
             showarrow=False, align="left",
             font=dict(size=10, color="#5F5E5A"),
-            bgcolor="rgba(255,255,255,0.85)",
+            bgcolor="rgba(255,255,255,0.88)",
             bordercolor="#D3D1C7", borderwidth=0.5, borderpad=8,
         )
 
-    # --- zero line -------------------------------------------------------
-    fig.add_hline(y=0, line=dict(color="#B4B2A9", width=0.8, dash="dash"))
+    fig.add_hline(y=0, line=dict(color="#D3D1C7", width=0.8, dash="dash"))
 
-    # --- axes & layout ---------------------------------------------------
+    y_pad = 0.01
+    y_min = min(all_y) - y_pad
+    y_max = max(all_y) + y_pad
+
     fig.update_xaxes(
         title_text="ISO week",
         tickmode="array",
@@ -1825,36 +1855,28 @@ def seasonality_comparison(
         range=[-0.5, 52.5],
     )
     fig.update_yaxes(
-        title_text="Cumulative return (from start of period)",
+        title_text="Cumulative return",
         tickformat=".1%",
         tickfont=dict(size=10, color="#888780"),
         gridcolor="#D3D1C7",
         zerolinecolor="#B4B2A9",
+        range=[y_min, y_max],
     )
-
     _apply_layout(
         fig,
-        title=f"{symbol} — Seasonality comparison",
+        title=f"{symbol} — Seasonality",
         subtitle=(
-            f"{current_year} actual vs 5y and 10y historical averages  ·  "
-            "shaded band = 10y ±1σ"
+            f"{current_year} vs {' / '.join(periods_to_plot)} historical averages  ·  "
+            f"shaded band = {long_term} ±1σ"
         ),
     )
     fig.update_layout(
-        height=500,
+        height=460,
         hovermode="x unified",
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02,
-            xanchor="right", x=1,
-            font=dict(size=11),
-        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, font=dict(size=11)),
     )
     return fig
-
-
-# ---------------------------------------------------------------------------
-# 17. Seasonality comparison — clean version (no std band)
-# ---------------------------------------------------------------------------
 
 def seasonality_comparison_clean(
     quant: QuantAnalytics,
@@ -2489,5 +2511,155 @@ def kelly(
         barmode="overlay",
         legend=dict(orientation="h", yanchor="bottom", y=1.01,
                     xanchor="right", x=1, font=dict(size=11)),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Seasonality box plot — full return distribution per period
+# ---------------------------------------------------------------------------
+
+def seasonality_box(
+    quant: QuantAnalytics,
+    symbol: str,
+    period: str = "10y",
+    granularity: str = "monthly",    # "monthly" | "weekly"
+    show_points: bool = True,        # overlay individual year dots
+    show_mean: bool = True,          # mark the mean with a diamond
+) -> go.Figure:
+    """
+    Box plot showing the full return distribution per month (or week).
+
+    More informative than a bar chart — reveals:
+      - Median vs mean (skew)
+      - Interquartile range (typical outcome spread)
+      - Outlier years (the dots beyond the whiskers)
+      - Which months have consistent direction vs high variance
+
+    Parameters
+    ----------
+    granularity  : "monthly" (12 boxes) or "weekly" (52 boxes)
+    show_points  : overlay individual year returns as dots (default True)
+    show_mean    : add a diamond marker at the mean (default True)
+
+    Hover on any dot shows the exact year and return.
+    """
+    if granularity == "monthly":
+        pivot   = quant.monthly_seasonality(symbol, period=period)
+        x_title = "Month"
+    else:
+        pivot   = quant.weekly_seasonality(symbol, period=period)
+        pivot.index = [f"W{int(w):02d}" for w in pivot.index]
+        x_title = "ISO week"
+
+    stats  = quant.seasonality_stats(pivot)
+    labels = list(pivot.index)
+
+    # colour each box by mean sign
+    box_colors = [
+        "#1D9E75" if stats.loc[lbl, "mean"] >= 0 else "#E24B4A"
+        for lbl in labels
+    ]
+
+    fig = go.Figure()
+
+    # --- one box per period -----------------------------------------------
+    for lbl, color in zip(labels, box_colors):
+        row_data = pivot.loc[lbl].dropna()
+        years    = row_data.index.tolist()
+        returns  = row_data.values.tolist()
+
+        fig.add_trace(go.Box(
+            y=returns,
+            name=lbl,
+            marker_color=color,
+            line_color=color,
+            fillcolor=color.replace("#", "rgba(").replace(
+                "1D9E75", "29,158,117,0.25)"
+            ).replace(
+                "E24B4A", "226,75,74,0.25)"
+            ) if color in ("#1D9E75", "#E24B4A") else f"rgba(180,178,169,0.25)",
+            boxmean=False,
+            showlegend=False,
+            hovertemplate=(
+                f"<b>{lbl}</b><br>"
+                "Return: %{y:.2%}<extra></extra>"
+            ),
+        ))
+
+        # individual year dots
+        if show_points:
+            fig.add_trace(go.Scatter(
+                x=[lbl] * len(years),
+                y=returns,
+                mode="markers",
+                marker=dict(
+                    size=7,
+                    color=color,
+                    opacity=0.75,
+                    line=dict(color="white", width=0.8),
+                ),
+                showlegend=False,
+                customdata=[[yr, ret] for yr, ret in zip(years, returns)],
+                hovertemplate=(
+                    f"<b>{lbl}</b><br>"
+                    "Year: %{customdata[0]}<br>"
+                    "Return: %{customdata[1]:.2%}<extra></extra>"
+                ),
+            ))
+
+        # mean diamond
+        if show_mean:
+            mean_val = float(stats.loc[lbl, "mean"])
+            fig.add_trace(go.Scatter(
+                x=[lbl],
+                y=[mean_val],
+                mode="markers",
+                marker=dict(
+                    symbol="diamond",
+                    size=9,
+                    color="white",
+                    line=dict(color=color, width=1.5),
+                ),
+                showlegend=False,
+                hovertemplate=(
+                    f"<b>{lbl} mean</b><br>"
+                    f"Return: {mean_val:.2%}<extra></extra>"
+                ),
+            ))
+
+    # zero line
+    fig.add_hline(y=0, line=dict(color="#B4B2A9", width=0.8, dash="dash"))
+
+    fig.update_yaxes(
+        title_text="Return",
+        tickformat=".1%",
+        gridcolor="#D3D1C7",
+        tickfont=dict(size=10, color="#888780"),
+        zerolinecolor="#B4B2A9",
+    )
+    fig.update_xaxes(
+        title_text=x_title,
+        tickfont=dict(size=10 if granularity == "monthly" else 8,
+                      color="#888780"),
+        tickangle=-45 if granularity == "weekly" else 0,
+        gridcolor="#D3D1C7",
+    )
+
+    n_years = int(stats["n_obs"].median())
+    _apply_layout(
+        fig,
+        title=f"{symbol} — {granularity.capitalize()} return distribution",
+        subtitle=(
+            f"~{n_years} years  ·  period: {_period_label(period)}  ·  "
+            "box = IQR  ·  whiskers = 1.5×IQR  ·  ◆ = mean  ·  "
+            "green = positive avg  ·  red = negative avg"
+        ),
+    )
+    fig.update_layout(
+        height=520,
+        boxmode="group",
+        boxgap=0.3,
+        boxgroupgap=0.1,
     )
     return fig

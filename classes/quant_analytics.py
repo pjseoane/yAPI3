@@ -859,8 +859,20 @@ class QuantAnalytics:
           pivot.mean(axis=1)          # average return per month
           (pivot > 0).mean(axis=1)    # win rate per month
           pivot.std(axis=1)           # volatility per month
+
+        Supports any "Ny" period string (e.g. "20y", "15y") — fetches
+        "max" data from yfinance and filters to the last N calendar years,
+        since yfinance only supports up to "10y" as a native period.
         """
-        prices  = self._prices(symbol, period=period, interval="1d")
+        # parse period → fetch "max" for anything beyond 10y
+        if period.endswith("y") and period[:-1].isdigit():
+            n_years      = int(period[:-1])
+            fetch_period = "max" if n_years > 10 else period
+        else:
+            n_years      = None
+            fetch_period = period
+
+        prices  = self._prices(symbol, period=fetch_period, interval="1d")
         monthly = prices.resample("ME").last().dropna()
         rets    = monthly.pct_change().dropna()
 
@@ -876,10 +888,79 @@ class QuantAnalytics:
         pivot = df.pivot_table(
             index="month", columns="year", values="ret", aggfunc="mean"
         )
-        pivot.index   = [_month_names[m - 1] for m in pivot.index]
+        pivot.index        = [_month_names[m - 1] for m in pivot.index]
         pivot.index.name   = "month"
         pivot.columns.name = "year"
+
+        # filter to last n_years if an explicit year count was requested
+        if n_years is not None:
+            all_years = sorted(pivot.columns.tolist())
+            pivot     = pivot[all_years[-n_years:]]
+
         return pivot
+
+    def seasonality_stats(
+        self,
+        pivot: "pd.DataFrame",
+    ) -> pd.DataFrame:
+        """
+        Compute summary statistics from a seasonality pivot table.
+
+        Works with both weekly_seasonality() and monthly_seasonality() output.
+
+        Parameters
+        ----------
+        pivot : DataFrame returned by weekly_seasonality() or monthly_seasonality()
+                rows = period (week/month), columns = year
+
+        Returns
+        -------
+        DataFrame with one row per period and columns:
+          mean        : average return across years
+          median      : median return
+          std         : standard deviation (dispersion of outcomes)
+          min         : worst year
+          max         : best year
+          win_rate    : fraction of years with positive return
+          n_obs       : number of years with data
+          skew        : return distribution skew (+ = more upside outliers)
+          best_year   : year of the best return
+          worst_year  : year of the worst return
+          sharpe      : mean / std (risk-adjusted seasonal edge)
+          reliability : "high" (n>=7), "medium" (n>=3), "low" (n<3)
+
+        Example
+        -------
+        pivot = qa.monthly_seasonality("SPY", period="10y")
+        stats = qa.seasonality_stats(pivot)
+        print(stats.sort_values("mean", ascending=False))
+        """
+        rows = {}
+        for period_label in pivot.index:
+            row_data = pivot.loc[period_label].dropna()
+            if row_data.empty:
+                continue
+            n = len(row_data)
+            mean   = float(row_data.mean())
+            std    = float(row_data.std()) if n > 1 else 0.0
+            rows[period_label] = {
+                "mean":       mean,
+                "median":     float(row_data.median()),
+                "std":        std,
+                "min":        float(row_data.min()),
+                "max":        float(row_data.max()),
+                "win_rate":   float((row_data > 0).mean()),
+                "n_obs":      n,
+                "skew":       float(row_data.skew()) if n > 2 else 0.0,
+                "best_year":  int(row_data.idxmax()),
+                "worst_year": int(row_data.idxmin()),
+                "sharpe":     round(mean / std, 3) if std > 0 else 0.0,
+                "reliability": "high" if n >= 7 else "medium" if n >= 3 else "low",
+            }
+        df = pd.DataFrame(rows).T
+        df.index.name = pivot.index.name
+        return df
+
 
     def seasonality_heatmap_data(
         self,
