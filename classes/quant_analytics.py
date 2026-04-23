@@ -49,7 +49,11 @@ class QuantAnalytics:
         if not bars:
             raise ValueError(f"No history returned for '{symbol}' (period={period})")
         df = pd.DataFrame(bars)
-        df["date"] = pd.to_datetime(df["date"])
+        dates = pd.to_datetime(df["date"])
+        # strip timezone so all downstream code (plots, groupby, joins) gets
+        # clean tz-naive date-only timestamps — yfinance returns tz-aware index
+        df["date"] = dates.dt.tz_convert(None) if dates.dt.tz is not None else dates
+        df["date"] = df["date"].dt.normalize()   # drop time component (00:00:00)
         return df.set_index("date")["adj_close"].sort_index().astype(float)
 
     def _prices_bulk(
@@ -802,91 +806,80 @@ class QuantAnalytics:
         self,
         symbol: str,
         period: str = "10y",
-        min_observations: int = 3,
     ) -> pd.DataFrame:
         """
-        Weekly seasonality study — mean return for each ISO week of the year.
+        Weekly seasonality study.
 
-        For each of the 52 (or 53) weeks, aggregates all occurrences across
-        the available history and returns statistics per week.
+        Returns a pivot table:
+          rows    : ISO week number (1–52/53)
+          columns : calendar year
+          values  : mean weekly return for that year/week (NaN if no data)
 
-        Parameters
-        ----------
-        symbol           : ticker
-        period           : history window — "5y", "10y", "max" recommended
-        min_observations : weeks with fewer years of data are flagged (column
-                           "reliable" = False)
+        Summing or averaging across columns gives the multi-year seasonal pattern.
+        Each column is one year so you can also compare individual years directly.
 
-        Returns
+        Example
         -------
-        DataFrame indexed by week number (1–52) with columns:
-          mean_return   : average weekly return across all years
-          median_return : median weekly return
-          std_return    : standard deviation of weekly returns
-          win_rate      : fraction of years where that week was positive
-          n_obs         : number of yearly observations for that week
-          reliable      : True when n_obs >= min_observations
-          cumulative    : cumulative sum of mean_return (shows seasonal drift)
+        df = qa.weekly_seasonality("AAPL", period="10y")
+        df["mean"] = df.mean(axis=1)   # average across all years
+        df["win_rate"] = (df > 0).mean(axis=1)
         """
-        # fetch daily adj-close and resample to weekly (Friday close)
         prices = self._prices(symbol, period=period, interval="1d")
         weekly = prices.resample("W-FRI").last().dropna()
-        weekly_returns = weekly.pct_change().dropna()
+        rets   = weekly.pct_change().dropna()
 
-        # tag each row with its ISO week number
-        df = weekly_returns.to_frame(name="return")
-        df["week"] = df.index.isocalendar().week.astype(int)
-        df["year"] = df.index.year
-
-        # aggregate per week number
-        grouped = df.groupby("week")["return"]
-        stats = pd.DataFrame({
-            "mean_return":   grouped.mean(),
-            "median_return": grouped.median(),
-            "std_return":    grouped.std(),
-            "win_rate":      grouped.apply(lambda x: (x > 0).mean()),
-            "n_obs":         grouped.count(),
+        # extract values as plain numpy — avoids ALL tz-aware index issues
+        df = pd.DataFrame({
+            "ret":  rets.values,
+            "week": rets.index.strftime("%V").astype(int).values,
+            "year": rets.index.year.values,
         })
 
-        stats["reliable"]   = stats["n_obs"] >= min_observations
-        stats["cumulative"] = stats["mean_return"].cumsum()
-        return stats
+        pivot = df.pivot_table(
+            index="week", columns="year", values="ret", aggfunc="mean"
+        )
+        pivot.index.name   = "week"
+        pivot.columns.name = "year"
+        return pivot
 
     def monthly_seasonality(
         self,
         symbol: str,
         period: str = "10y",
-        min_observations: int = 3,
     ) -> pd.DataFrame:
         """
-        Monthly seasonality — same as weekly_seasonality but at month granularity.
+        Monthly seasonality study.
 
-        Returns a DataFrame indexed 1–12 with the same columns.
-        Useful as a higher-level complement to the weekly view.
+        Returns a pivot table:
+          rows    : month name (Jan–Dec)
+          columns : calendar year
+          values  : monthly return for that year/month (NaN if no data)
+
+        Same design as weekly_seasonality() — derive stats across columns:
+          pivot.mean(axis=1)          # average return per month
+          (pivot > 0).mean(axis=1)    # win rate per month
+          pivot.std(axis=1)           # volatility per month
         """
-        prices = self._prices(symbol, period=period, interval="1d")
-        monthly = prices.resample("BME").last().dropna()
-        monthly_returns = monthly.pct_change().dropna()
+        prices  = self._prices(symbol, period=period, interval="1d")
+        monthly = prices.resample("ME").last().dropna()
+        rets    = monthly.pct_change().dropna()
 
-        df = monthly_returns.to_frame(name="return")
-        df["month"] = df.index.month
+        _month_names = ["Jan","Feb","Mar","Apr","May","Jun",
+                        "Jul","Aug","Sep","Oct","Nov","Dec"]
 
-        grouped = df.groupby("month")["return"]
-        stats = pd.DataFrame({
-            "mean_return":   grouped.mean(),
-            "median_return": grouped.median(),
-            "std_return":    grouped.std(),
-            "win_rate":      grouped.apply(lambda x: (x > 0).mean()),
-            "n_obs":         grouped.count(),
+        df = pd.DataFrame({
+            "ret":   rets.values,
+            "month": rets.index.month.values,
+            "year":  rets.index.year.values,
         })
-        stats.index = pd.Index(
-            ["Jan","Feb","Mar","Apr","May","Jun",
-             "Jul","Aug","Sep","Oct","Nov","Dec"],
-            name="month"
+
+        pivot = df.pivot_table(
+            index="month", columns="year", values="ret", aggfunc="mean"
         )
-        stats["reliable"]   = stats["n_obs"] >= min_observations
-        stats["cumulative"] = stats["mean_return"].cumsum()
-        return stats
+        pivot.index   = [_month_names[m - 1] for m in pivot.index]
+        pivot.index.name   = "month"
+        pivot.columns.name = "year"
+        return pivot
 
     def seasonality_heatmap_data(
         self,
@@ -905,8 +898,8 @@ class QuantAnalytics:
         weekly_returns = weekly.pct_change().dropna()
 
         df = weekly_returns.to_frame(name="return")
-        df["week"] = df.index.isocalendar().week.astype(int)
-        df["year"] = df.index.year
+        df["week"] = weekly_returns.index.strftime("%V").astype(int)
+        df["year"] = weekly_returns.index.year
 
         # pivot: rows=year, cols=week
         pivot = df.pivot_table(
@@ -915,3 +908,204 @@ class QuantAnalytics:
         # keep only weeks 1–52
         pivot = pivot[[c for c in range(1, 53) if c in pivot.columns]]
         return pivot
+
+    # ------------------------------------------------------------------
+    # Kelly Criterion
+    # ------------------------------------------------------------------
+
+    def kelly(
+        self,
+        symbol: str,
+        period: str = "2y",
+        fractional: float = 1.0,
+        risk_free_rate: float = 0.05,
+    ) -> dict:
+        """
+        Kelly Criterion position sizing for a single stock.
+
+        ── What Kelly tells you ────────────────────────────────────────
+        Kelly answers: given the statistical edge and risk of this asset,
+        what fraction of capital should be allocated to maximise long-run
+        geometric growth?
+
+        For a continuous return distribution the formula simplifies to:
+
+            f* = μ / σ²
+
+        where μ is the expected excess return (above risk-free) and σ²
+        is the variance of returns. Both are annualised.
+
+        ── Interpreting the result ─────────────────────────────────────
+        f* = 0.30  → full Kelly says risk 30% of capital on this stock
+        f* < 0     → no edge over the risk-free rate — do not hold
+        f* > 1     → extreme edge signal (rare; usually means overfitting
+                     to a short or lucky history — treat with scepticism)
+
+        ── Why full Kelly is almost never used ─────────────────────────
+        Full Kelly assumes:
+          • The return distribution is perfectly known (it never is)
+          • You can tolerate the resulting drawdowns (psychologically hard)
+          • Returns are i.i.d. (autocorrelation and regimes exist)
+
+        In practice, fractional Kelly is standard:
+          • Half Kelly  (fractional=0.5) — halves volatility, keeps ~75%
+            of the growth rate. Most common real-world choice.
+          • Quarter Kelly (fractional=0.25) — very conservative, smooth
+            equity curve, good for uncertain or short histories.
+
+        ── Best use: relative ranking, not absolute sizing ─────────────
+        The raw fraction is sensitive to estimation error in μ and σ.
+        The most robust use of Kelly is as a ranking tool:
+          kelly_bulk(symbols) sorted highest → lowest shows which stocks
+          had the strongest risk-adjusted edge in the history window.
+        Use the absolute fraction only as a rough upper bound on sizing.
+
+        Parameters
+        ----------
+        symbol        : ticker
+        period        : history window for μ and σ estimation (default "2y")
+        fractional    : Kelly multiplier — 1.0 = full Kelly, 0.5 = half
+                        Kelly, 0.25 = quarter Kelly (default 1.0)
+        risk_free_rate: annual risk-free rate (default 0.05)
+
+        Returns
+        -------
+        dict with keys:
+          symbol           : ticker
+          period           : history window used
+          full_kelly       : f* = μ / σ²  (uncapped)
+          fractional_kelly : full_kelly × fractional
+          fraction_label   : human-readable label (e.g. "Half Kelly")
+          mu_annual        : annualised expected excess return
+          sigma_annual     : annualised volatility
+          sharpe_ratio     : μ / σ  (related: Kelly = Sharpe / σ)
+          edge             : μ  (positive = edge over risk-free)
+          has_edge         : True when full_kelly > 0
+          suggested_max    : min(fractional_kelly, 0.25) — a conservative
+                             cap that accounts for estimation uncertainty
+        """
+        rets     = self._simple_returns(self._prices(symbol, period))
+        daily_rf = risk_free_rate / self.trading_days
+        excess   = rets - daily_rf
+
+        mu    = float(excess.mean() * self.trading_days)      # annualised
+        sigma = float(rets.std() * np.sqrt(self.trading_days))
+        var   = sigma ** 2
+
+        full_kelly = mu / var if var > 0 else 0.0
+        frac_kelly = full_kelly * fractional
+
+        # fraction label
+        labels = {1.0: "Full Kelly", 0.5: "Half Kelly",
+                  0.25: "Quarter Kelly", 0.33: "Third Kelly"}
+        label = labels.get(fractional, f"{fractional:.0%} Kelly")
+
+        return {
+            "symbol":           symbol,
+            "period":           period,
+            "full_kelly":       round(full_kelly, 4),
+            "fractional_kelly": round(frac_kelly, 4),
+            "fraction_label":   label,
+            "mu_annual":        round(mu, 4),
+            "sigma_annual":     round(sigma, 4),
+            "sharpe_ratio":     round(mu / sigma, 4) if sigma > 0 else 0.0,
+            "edge":             round(mu, 4),
+            "has_edge":         full_kelly > 0,
+            "suggested_max":    round(min(max(frac_kelly, 0.0), 0.25), 4),
+        }
+
+    def kelly_bulk(
+        self,
+        symbols: list[str],
+        period: str = "2y",
+        fractional: float = 0.5,
+        risk_free_rate: float = 0.05,
+    ) -> pd.DataFrame:
+        """
+        Kelly Criterion for multiple symbols — returns a ranked comparison table.
+
+        ── Best use ────────────────────────────────────────────────────
+        Use kelly_bulk() as a relative ranking tool rather than relying
+        on the absolute fraction numbers. The ranking is more stable than
+        the raw fractions across different history windows because ranking
+        is less sensitive to small changes in μ and σ estimates.
+
+        Sorting by full_kelly descending answers:
+          "Which stocks had the strongest risk-adjusted edge historically?"
+
+        Parameters
+        ----------
+        symbols       : list of tickers
+        period        : history window (default "2y" — long enough for
+                        reliable σ, short enough to reflect recent regime)
+        fractional    : Kelly multiplier applied to all symbols (default 0.5
+                        = half Kelly, the most common practical choice)
+        risk_free_rate: annual risk-free rate (default 0.05)
+
+        Returns
+        -------
+        DataFrame sorted by full_kelly descending, columns:
+          full_kelly, fractional_kelly, mu_annual, sigma_annual,
+          sharpe_ratio, has_edge, suggested_max
+        """
+        rows = {}
+        for sym in symbols:
+            try:
+                r = self.kelly(sym, period, fractional, risk_free_rate)
+                rows[sym] = {k: v for k, v in r.items()
+                             if k not in ("symbol", "period", "fraction_label", "edge")}
+            except Exception as e:
+                print(f"Skipping {sym}: {e}")
+
+        df = pd.DataFrame(rows).T
+        df.index.name = "symbol"
+        return df.sort_values("full_kelly", ascending=False)
+
+    def kelly_portfolio(
+        self,
+        symbols: list[str],
+        period: str = "2y",
+        fractional: float = 0.5,
+        risk_free_rate: float = 0.05,
+        normalise: bool = True,
+    ) -> pd.Series:
+        """
+        Kelly-optimal portfolio weights across multiple symbols.
+
+        ── How it works ────────────────────────────────────────────────
+        Each symbol gets a weight proportional to its fractional Kelly
+        fraction. Symbols with no edge (Kelly ≤ 0) get zero weight.
+
+        This is a simplified single-asset Kelly applied independently —
+        not the full multi-asset Kelly (which requires inverting the
+        covariance matrix and is very sensitive to estimation error).
+        The simplified version is more robust in practice.
+
+        ── Comparison with other optimisers ────────────────────────────
+        Max Sharpe  → maximises return per unit of total risk
+        Min Variance → minimises total portfolio vol
+        Risk Parity  → equalises risk contribution per asset
+        Kelly        → maximises long-run geometric growth rate
+                       (implicitly penalises variance, rewards edge)
+
+        Parameters
+        ----------
+        symbols    : list of tickers
+        period     : history window (default "2y")
+        fractional : Kelly multiplier (default 0.5 = half Kelly)
+        normalise  : if True, weights sum to 1.0 (default True)
+                     if False, weights are raw Kelly fractions (may not sum to 1)
+
+        Returns
+        -------
+        pd.Series  symbol → weight, sorted descending
+                   (zero-weight symbols included for transparency)
+        """
+        bulk = self.kelly_bulk(symbols, period, fractional, risk_free_rate)
+
+        weights = bulk["fractional_kelly"].astype(float).clip(lower=0.0)
+
+        if normalise and weights.sum() > 0:
+            weights = weights / weights.sum()
+
+        return weights.sort_values(ascending=False).rename("kelly_weight")

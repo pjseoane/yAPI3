@@ -214,10 +214,18 @@ class StockClient:
     # ------------------------------------------------------------------
 
     # Period ordering — larger rank = longer history
+    # Note: yfinance only supports up to "10y"; anything beyond should be "max"
     _PERIOD_RANK: dict = {
         "1d": 0, "5d": 1, "1mo": 2, "3mo": 3, "6mo": 4,
         "1y": 5, "2y": 6, "3y": 7, "5y": 8, "10y": 9,
         "ytd": 4, "max": 99,
+    }
+
+    # Days per period for cache slicing — extended to handle common strings
+    _PERIOD_DAYS: dict = {
+        "1d": 1, "5d": 5, "1mo": 30, "3mo": 91, "6mo": 182,
+        "ytd": 365, "1y": 365, "2y": 730, "3y": 1095,
+        "5y": 1825, "10y": 3650, "max": 999_999,
     }
 
     def get_history(

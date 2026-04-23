@@ -1430,21 +1430,22 @@ def seasonality(
     granularity : "weekly"  → 52 bars, one per ISO week
                   "monthly" → 12 bars, one per calendar month
     """
+    # both weekly and monthly now return a pivot (period × year)
     if granularity == "monthly":
-        stats  = quant.monthly_seasonality(symbol, period=period)
-        x_vals = list(stats.index)
+        pivot   = quant.monthly_seasonality(symbol, period=period)
+        x_vals  = list(pivot.index)   # ["Jan", "Feb", ...]
         x_title = "Month"
     else:
-        stats  = quant.weekly_seasonality(symbol, period=period)
-        x_vals = [f"W{int(w):02d}" for w in stats.index]
+        pivot   = quant.weekly_seasonality(symbol, period=period)
+        x_vals  = [f"W{int(w):02d}" for w in pivot.index]
         x_title = "ISO week"
 
-    mean_ret   = stats["mean_return"].values
-    median_ret = stats["median_return"].values
-    win_rate   = stats["win_rate"].values
-    n_obs      = stats["n_obs"].values
-    cumul      = stats["cumulative"].values
-    reliable   = stats["reliable"].values
+    mean_ret   = pivot.mean(axis=1).values
+    median_ret = pivot.median(axis=1).values
+    win_rate   = (pivot > 0).mean(axis=1).values
+    n_obs      = pivot.count(axis=1).values
+    cumul      = pivot.mean(axis=1).cumsum().values
+    reliable   = pivot.count(axis=1).values >= 3
 
     colors  = ["#1D9E75" if v >= 0 else "#E24B4A" for v in mean_ret]
     opacity = [0.85 if r else 0.35 for r in reliable]
@@ -1550,8 +1551,8 @@ def seasonality(
         tickangle=-45 if granularity == "weekly" else 0,
     )
 
-    n_years = int(stats["n_obs"].median())
-    _apply_date_layout(
+    n_years = int(np.nanmedian(n_obs))
+    _apply_layout(                           # categorical x-axis — NOT date type
         fig,
         title=f"{symbol} — {granularity.capitalize()} seasonality",
         subtitle=f"~{n_years} years of data  ·  period: {_period_label(period)}  ·  "
@@ -1618,7 +1619,7 @@ def seasonality_heatmap(
         tickfont=dict(size=10, color="#888780"),
         title_text="Year",
     )
-    _apply_date_layout(
+    _apply_layout(
         fig,
         title=f"{symbol} — Weekly return heatmap",
         subtitle=f"{n_years} years  ·  period: {_period_label(period)}  ·  "
@@ -1663,26 +1664,30 @@ def seasonality_comparison(
     current_year    = datetime.date.today().year
 
     # --- fetch and build weekly returns for each historical period -------
-    def _weekly_cumulative_mean(period: str) -> pd.Series:
+    def _weekly_cumulative_mean(period: str) -> tuple[pd.Series, pd.Series]:
         """Mean cumulative return per ISO week across all years in period."""
-        stats = quant.weekly_seasonality(symbol, period=period)
-        # cumulative = cumsum of mean weekly returns, starting at 0
-        cumul = stats["mean_return"].cumsum()
-        cumul = pd.concat([pd.Series([0.0], index=[0]), cumul])
+        pivot      = quant.weekly_seasonality(symbol, period=period)
+        hist_cols  = [c for c in pivot.columns if c != current_year]
+        mean_rets  = pivot[hist_cols].mean(axis=1)
+        # reindex to all 52 weeks and fill gaps with 0 so cumsum never
+        # encounters NaN — early weeks are missing when period starts mid-year
+        mean_rets  = mean_rets.reindex(range(1, 53), fill_value=0.0)
+        cumul      = mean_rets.cumsum()
+        cumul      = pd.concat([pd.Series([0.0], index=[0]), cumul])
         cumul.index = list(range(len(cumul)))
-        return cumul, stats["mean_return"]
+        return cumul, mean_rets
 
     # --- fetch current year actual weekly returns ------------------------
     def _current_year_cumulative() -> tuple[pd.Series, list[int]]:
         """Actual cumulative return for the current year, week by week."""
         prices = quant._prices(symbol, period="1y", interval="1d")
-        # filter to current year only
         cy_prices = prices[prices.index.year == current_year]
         if cy_prices.empty:
             return pd.Series(dtype=float), []
         weekly = cy_prices.resample("W-FRI").last().dropna()
         weekly_rets = weekly.pct_change().dropna()
-        weeks = weekly_rets.index.isocalendar().week.astype(int).tolist()
+        # strftime avoids tz-aware isocalendar() alignment issues
+        weeks = weekly_rets.index.strftime("%V").astype(int).tolist()
         cumul_vals = [0.0] + list((1 + weekly_rets).cumprod() - 1)
         weeks_x    = [0] + weeks
         return pd.Series(cumul_vals, index=weeks_x), weeks
@@ -1714,8 +1719,10 @@ def seasonality_comparison(
 
             # confidence band for 10y (± 1 std of cumulative paths)
             if period == "10y":
-                stats = quant.weekly_seasonality(symbol, period="10y")
-                std_cumul = stats["std_return"].cumsum()
+                pivot10   = quant.weekly_seasonality(symbol, period="10y")
+                hist_cols10 = [c for c in pivot10.columns if c != current_year]
+                std_ret10   = pivot10[hist_cols10].std(axis=1).reindex(range(1, 53), fill_value=0.0)
+                std_cumul   = std_ret10.cumsum()
                 std_cumul = pd.concat([pd.Series([0.0], index=[0]), std_cumul])
                 upper = cumul + std_cumul.values
                 lower = cumul - std_cumul.values
@@ -1825,7 +1832,7 @@ def seasonality_comparison(
         zerolinecolor="#B4B2A9",
     )
 
-    _apply_date_layout(
+    _apply_layout(
         fig,
         title=f"{symbol} — Seasonality comparison",
         subtitle=(
@@ -1852,81 +1859,162 @@ def seasonality_comparison(
 def seasonality_comparison_clean(
     quant: QuantAnalytics,
     symbol: str,
+    long_term: str = "10y",
+    short_term: str = "5y",
     extra_periods: list[str] | None = None,
 ) -> go.Figure:
     """
-    Clean seasonality comparison — current year vs historical averages.
+    Seasonality comparison — current year vs historical averages.
 
-    Same concept as seasonality_comparison() but without the ±1σ band,
-    giving a tighter y-axis range and cleaner lines that are easier to read.
+    Logic (clean, from scratch)
+    ---------------------------
+    For each period (long_term, short_term, extras):
+      1. Get the pivot table  (rows=week, cols=year)
+      2. Drop the current year column (partial data would bias the average)
+      3. For each remaining year-column compute cumulative return:
+             (1+r_w1) * (1+r_w2) * ... - 1
+      4. Average those per-year cumulative curves across all years
+         → "average seasonal year" for that period
+    Then plot the current year column as the live actual line.
+
+    Parameters
+    ----------
+    long_term     : longer reference window — gray dotted  (default "10y")
+    short_term    : shorter reference window — blue dashed (default "5y")
+    extra_periods : additional windows, e.g. ["3y", "2y"]
+
+    Examples
+    --------
+    plots.seasonality_comparison_clean(quant, "SPY").show()
+    plots.seasonality_comparison_clean(quant, "SPY",
+        long_term="20y", short_term="5y").show()
     """
     import datetime
 
-    periods_to_plot = ["10y", "5y"] + (extra_periods or [])
-    current_year    = datetime.date.today().year
+    current_year = datetime.date.today().year
 
-    def _weekly_cumulative_mean(period: str) -> tuple[pd.Series, pd.Series]:
-        stats = quant.weekly_seasonality(symbol, period=period)
-        cumul = stats["mean_return"].cumsum()
-        cumul = pd.concat([pd.Series([0.0], index=[0]), cumul])
-        cumul.index = list(range(len(cumul)))
-        return cumul, stats["mean_return"]
+    # deduplicated list of periods to plot
+    periods_to_plot = [long_term, short_term] + (extra_periods or [])
+    seen = set()
+    periods_to_plot = [p for p in periods_to_plot
+                       if not (p in seen or seen.add(p))]
 
-    def _current_year_cumulative() -> tuple[pd.Series, list[int]]:
-        prices = quant._prices(symbol, period="1y", interval="1d")
-        cy_prices = prices[prices.index.year == current_year]
-        if cy_prices.empty:
-            return pd.Series(dtype=float), []
-        weekly      = cy_prices.resample("W-FRI").last().dropna()
-        weekly_rets = weekly.pct_change().dropna()
-        weeks       = weekly_rets.index.isocalendar().week.astype(int).tolist()
-        cumul_vals  = [0.0] + list((1 + weekly_rets).cumprod() - 1)
-        return pd.Series(cumul_vals, index=[0] + weeks), weeks
+    # ── helper: average cumulative return curve for a period ─────────────
+    def _avg_cumret(period: str) -> pd.Series:
+        """
+        Average cumulative return across all historical years in the period.
 
-    hist_styles = {
-        "10y": dict(color="#888780", width=1.8, dash="dot"),
-        "5y":  dict(color="#378ADD", width=1.8, dash="dash"),
-        "3y":  dict(color="#BA7517", width=1.5, dash="dashdot"),
-        "2y":  dict(color="#534AB7", width=1.5, dash="longdash"),
-    }
+        Handles any "Ny" period string (e.g. "20y", "15y") by fetching
+        "max" data and filtering to the last N complete years — since yfinance
+        only supports up to "10y" as a valid period string.
 
-    fig = go.Figure()
+        Steps:
+          1. Parse period → number of years (N)
+          2. Fetch "max" data if N > 10, else use period directly
+          3. Filter pivot to last N years, exclude current year
+          4. Drop any year with < 40 weeks of data (incomplete first year)
+          5. Per year-column: cumulative return = (1+r1)(1+r2)... - 1
+          6. Mean across year-columns → average seasonal curve
+        """
+        # parse period string → year count
+        if period.endswith("y") and period[:-1].isdigit():
+            n_years     = int(period[:-1])
+            fetch_period = "max" if n_years > 10 else period
+        else:
+            n_years      = None
+            fetch_period = period
 
-    # --- historical lines (no band) --------------------------------------
-    all_y = [0.0]
-    hist_at_now = {}
+        pivot     = quant.weekly_seasonality(symbol, period=fetch_period)
 
-    for period in periods_to_plot:
+        # exclude current year, then take the last n_years complete years
+        hist_cols = sorted([c for c in pivot.columns if c != current_year])
+        if n_years is not None:
+            hist_cols = hist_cols[-n_years:]
+
+        if not hist_cols:
+            return pd.Series(dtype=float)
+
+        hist = pivot[hist_cols]
+        # no week-count filter needed — mean(skipna=True) already handles
+        # partial years gracefully (NaN weeks just don't contribute to the mean)
+
+        # cumulative return per year-column, reindexed to full 52 weeks
+        def _col_cumret(col):
+            valid = col.dropna()
+            if valid.empty:
+                return pd.Series(dtype=float)
+            return ((1 + valid).cumprod() - 1).reindex(range(1, 53))
+
+        cum_df = hist.apply(_col_cumret)
+        avg    = cum_df.mean(axis=1, skipna=True)
+        return avg.reindex(range(1, 53))
+
+    # ── helper: current year actual cumulative return ─────────────────────
+    def _current_year_cumret() -> tuple[pd.Series, int]:
+        pivot = quant.weekly_seasonality(symbol, period="1y")
+        if current_year not in pivot.columns:
+            return pd.Series(dtype=float), 0
+        cy    = pivot[current_year].dropna()
+        if cy.empty:
+            return pd.Series(dtype=float), 0
+        cumret   = (1 + cy).cumprod() - 1
+        last_week = int(cy.index[-1])
+        return cumret, last_week
+
+    # ── build x-axis: prepend week 0 = 0% starting point ─────────────────
+    def _to_xy(avg: pd.Series) -> tuple[list, list]:
+        """Prepend (0, 0.0) so every line starts at the origin."""
+        x = [0] + avg.dropna().index.tolist()
+        y = [0.0] + avg.dropna().tolist()
+        return x, y
+
+    # ── styles ─────────────────────────────────────────────────────────────
+    _extra_colors = ["#BA7517", "#534AB7", "#D85A30", "#A32D2D"]
+    _extra_dashes = ["dashdot", "longdash", "dot", "dash"]
+
+    def _style(period, idx):
+        if period == long_term:
+            return dict(color="#888780", width=1.8, dash="dot")
+        if period == short_term:
+            return dict(color="#378ADD", width=1.8, dash="dash")
+        ei = (idx - 2) % len(_extra_colors)
+        return dict(color=_extra_colors[ei], width=1.5, dash=_extra_dashes[ei])
+
+    # ── plot ───────────────────────────────────────────────────────────────
+    fig      = go.Figure()
+    all_y    = [0.0]
+    hist_avgs = {}
+
+    for i, period in enumerate(periods_to_plot):
         try:
-            cumul, _ = _weekly_cumulative_mean(period)
-            all_y.extend(cumul.values.tolist())
-            style = hist_styles.get(period, dict(color="#888780", width=1.5, dash="dot"))
+            avg = _avg_cumret(period)
+            x, y = _to_xy(avg)
+            all_y.extend(y)
             fig.add_trace(go.Scatter(
-                x=list(range(len(cumul))),
-                y=cumul.values,
+                x=x, y=y,
                 mode="lines",
                 name=f"{period} avg",
-                line=style,
+                line=_style(period, i),
                 hovertemplate=(
                     f"<b>{period} avg</b><br>"
                     "Week %{x}<br>Cumulative: %{y:.2%}<extra></extra>"
                 ),
             ))
-            hist_at_now[period] = cumul
+            hist_avgs[period] = dict(zip(x, y))
         except Exception as e:
             print(f"Skipping {period}: {e}")
 
-    # --- current year ----------------------------------------------------
-    cy_cumul, cy_weeks = _current_year_cumulative()
-    last_week = cy_weeks[-1] if cy_weeks else 0
+    # current year
+    cy_cumret, last_week = _current_year_cumret()
+    if not cy_cumret.empty:
+        x_cy = [0] + cy_cumret.index.tolist()
+        y_cy = [0.0] + cy_cumret.tolist()
+        all_y.extend(y_cy)
 
-    if not cy_cumul.empty:
-        all_y.extend(cy_cumul.values.tolist())
         fig.add_trace(go.Scatter(
-            x=list(cy_cumul.index),
-            y=cy_cumul.values,
+            x=x_cy, y=y_cy,
             mode="lines+markers",
-            name=f"{current_year}",
+            name=str(current_year),
             line=dict(color="#1D9E75", width=2.5),
             marker=dict(size=5, color="#1D9E75",
                         line=dict(color="white", width=1)),
@@ -1939,25 +2027,21 @@ def seasonality_comparison_clean(
         fig.add_vline(
             x=last_week,
             line=dict(color="#D3D1C7", width=1, dash="dot"),
-            annotation=dict(
-                text=f"W{last_week:02d}",
-                font=dict(size=9, color="#888780"),
-            ),
+            annotation=dict(text=f"W{last_week:02d}",
+                            font=dict(size=9, color="#888780")),
         )
 
-        # annotation box
-        cy_now = float(cy_cumul.iloc[-1])
+        # annotation box: how is current year doing vs each period?
+        cy_now    = float(y_cy[-1])
         ann_lines = [f"<b>{current_year} at W{last_week:02d}: {cy_now:+.2%}</b>"]
-        for period, cumul in hist_at_now.items():
-            hist_now = float(cumul.iloc[min(last_week, len(cumul) - 1)])
+        for period, avg_dict in hist_avgs.items():
+            hist_now = avg_dict.get(last_week, avg_dict.get(max(avg_dict.keys())))
             diff     = cy_now - hist_now
             arrow    = "▲" if diff >= 0 else "▼"
             clr      = "#0F6E56" if diff >= 0 else "#A32D2D"
             ann_lines.append(
-                f"vs {period}: "
-                f"<span style='color:{clr}'>{arrow} {diff:+.2%}</span>"
+                f"vs {period}: <span style=\'color:{clr}\'>{arrow} {diff:+.2%}</span>"
             )
-
         fig.add_annotation(
             xref="paper", yref="paper", x=0.01, y=0.99,
             text="<br>".join(ann_lines),
@@ -1967,10 +2051,8 @@ def seasonality_comparison_clean(
             bordercolor="#D3D1C7", borderwidth=0.5, borderpad=8,
         )
 
-    # --- zero line -------------------------------------------------------
     fig.add_hline(y=0, line=dict(color="#D3D1C7", width=0.8, dash="dash"))
 
-    # --- tight y-axis range (only actual data, no std inflation) ---------
     y_pad = 0.01
     y_min = min(all_y) - y_pad
     y_max = max(all_y) + y_pad
@@ -1992,8 +2074,7 @@ def seasonality_comparison_clean(
         zerolinecolor="#B4B2A9",
         range=[y_min, y_max],
     )
-
-    _apply_date_layout(
+    _apply_layout(
         fig,
         title=f"{symbol} — Seasonality",
         subtitle=f"{current_year} vs {' / '.join(periods_to_plot)} historical averages",
@@ -2001,10 +2082,8 @@ def seasonality_comparison_clean(
     fig.update_layout(
         height=440,
         hovermode="x unified",
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02,
-            xanchor="right", x=1, font=dict(size=11),
-        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, font=dict(size=11)),
     )
     return fig
 
@@ -2242,4 +2321,173 @@ def factor_comparison(
         subtitle=f"{len(results)} symbols  ·  period: {_period_label(results[0].period)}",
     )
     fig.update_layout(barmode="group", height=420)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Kelly Criterion — position sizing chart
+# ---------------------------------------------------------------------------
+
+def kelly(
+    quant: QuantAnalytics,
+    symbols: list[str],
+    period: str = "2y",
+    fractional: float = 0.5,
+    risk_free_rate: float = 0.05,
+) -> go.Figure:
+    """
+    Kelly Criterion visualisation — three panels for a basket of stocks.
+
+    Panel 1 (bar): Full Kelly vs Fractional Kelly per symbol.
+                   Bars above 0 = positive edge. Red = no edge.
+    Panel 2 (scatter): Kelly fraction vs Sharpe ratio — shows the
+                       relationship between edge quality and sizing.
+    Panel 3 (bar): Suggested max allocation (capped at 25%) as a
+                   practical position size guide.
+
+    Reading the chart
+    -----------------
+    • Tall green bar → strong historical edge, larger Kelly fraction
+    • Red bar        → no edge over risk-free rate — Kelly says avoid
+    • High Kelly + high Sharpe → genuinely good risk-adjusted opportunity
+    • High Kelly + low Sharpe  → high return but also high vol — be cautious
+    • Suggested max is min(half_kelly, 25%) — a conservative real-world cap
+    """
+    df = quant.kelly_bulk(symbols, period=period, fractional=fractional,
+                          risk_free_rate=risk_free_rate)
+
+    syms        = list(df.index)
+    full_kelly  = df["full_kelly"].astype(float).tolist()
+    frac_kelly  = df["fractional_kelly"].astype(float).tolist()
+    sharpe      = df["sharpe_ratio"].astype(float).tolist()
+    suggested   = df["suggested_max"].astype(float).tolist()
+    has_edge    = df["has_edge"].tolist()
+    mu          = df["mu_annual"].astype(float).tolist()
+    sigma       = df["sigma_annual"].astype(float).tolist()
+
+    colors = ["#1D9E75" if e else "#E24B4A" for e in has_edge]
+    frac_label = {1.0: "Full", 0.5: "Half", 0.25: "Quarter"}.get(fractional,
+                  f"{fractional:.0%}")
+
+    fig = make_subplots(
+        rows=3, cols=1,
+        row_heights=[0.42, 0.30, 0.28],
+        vertical_spacing=0.08,
+        subplot_titles=[
+            f"Full Kelly vs {frac_label} Kelly fraction",
+            "Kelly fraction vs Sharpe ratio",
+            "Suggested max allocation (capped at 25%)",
+        ],
+    )
+
+    # ── Panel 1: Full Kelly bars + Fractional Kelly overlay ──────────────
+    fig.add_trace(go.Bar(
+        x=syms, y=full_kelly,
+        name="Full Kelly",
+        marker_color=[c.replace(")", ",0.35)").replace("rgb", "rgba")
+                      if c.startswith("rgb") else c
+                      for c in colors],
+        marker_opacity=0.45,
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Full Kelly: %{y:.1%}<extra>Full Kelly</extra>"
+        ),
+    ), row=1, col=1)
+
+    fig.add_trace(go.Bar(
+        x=syms, y=frac_kelly,
+        name=f"{frac_label} Kelly",
+        marker_color=colors,
+        customdata=list(zip(mu, sigma, sharpe)),
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            f"{frac_label} Kelly: %{{y:.1%}}<br>"
+            "μ (ann.): %{customdata[0]:.1%}<br>"
+            "σ (ann.): %{customdata[1]:.1%}<br>"
+            "Sharpe: %{customdata[2]:.2f}"
+            "<extra></extra>"
+        ),
+    ), row=1, col=1)
+
+    fig.add_hline(y=0, row=1, col=1,
+                  line=dict(color="#B4B2A9", width=0.8, dash="dash"))
+    fig.add_hline(y=0.25, row=1, col=1,
+                  line=dict(color="#BA7517", width=0.8, dash="dot"),
+                  annotation=dict(text="25% cap", font=dict(size=9,
+                  color="#BA7517")))
+
+    fig.update_yaxes(tickformat=".0%", row=1, col=1,
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+
+    # ── Panel 2: Kelly vs Sharpe scatter ─────────────────────────────────
+    for sym, fk, sr, clr, has in zip(syms, frac_kelly, sharpe, colors, has_edge):
+        fig.add_trace(go.Scatter(
+            x=[sr], y=[fk],
+            mode="markers+text",
+            marker=dict(size=12, color=clr,
+                        line=dict(color="white", width=1)),
+            text=[sym], textposition="top right",
+            textfont=dict(size=9, color=clr),
+            showlegend=False,
+            hovertemplate=(
+                f"<b>{sym}</b><br>"
+                f"Sharpe: {sr:.2f}<br>"
+                f"{frac_label} Kelly: {fk:.1%}<extra></extra>"
+            ),
+        ), row=2, col=1)
+
+    fig.add_hline(y=0, row=2, col=1,
+                  line=dict(color="#B4B2A9", width=0.8, dash="dash"))
+    fig.add_vline(x=0, row=2, col=1,
+                  line=dict(color="#B4B2A9", width=0.8, dash="dash"))
+
+    fig.update_xaxes(title_text="Sharpe ratio", row=2, col=1,
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+    fig.update_yaxes(title_text=f"{frac_label} Kelly",
+                     tickformat=".0%", row=2, col=1,
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+
+    # ── Panel 3: Suggested max allocation ────────────────────────────────
+    fig.add_trace(go.Bar(
+        x=syms, y=suggested,
+        name="Suggested max",
+        marker_color=colors,
+        text=[f"{v:.0%}" for v in suggested],
+        textposition="outside",
+        textfont=dict(size=9),
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Suggested max: %{y:.1%}"
+            "<extra></extra>"
+        ),
+    ), row=3, col=1)
+
+    fig.add_hline(y=0.25, row=3, col=1,
+                  line=dict(color="#BA7517", width=0.8, dash="dot"))
+
+    fig.update_yaxes(tickformat=".0%", row=3, col=1,
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"),
+                     range=[0, 0.30])
+
+    # ── layout ───────────────────────────────────────────────────────────
+    _apply_layout(
+        fig,
+        title="Kelly Criterion — position sizing analysis",
+        subtitle=(
+            f"period: {_period_label(period)}  ·  "
+            f"{frac_label} Kelly shown  ·  "
+            f"rf: {risk_free_rate:.0%}  ·  "
+            "green = positive edge  ·  red = no edge"
+        ),
+    )
+    fig.update_layout(
+        height=700,
+        barmode="overlay",
+        legend=dict(orientation="h", yanchor="bottom", y=1.01,
+                    xanchor="right", x=1, font=dict(size=11)),
+    )
     return fig
