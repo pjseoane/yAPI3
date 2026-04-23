@@ -2663,3 +2663,207 @@ def seasonality_box(
         boxgroupgap=0.1,
     )
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Rolling holding period returns
+# ---------------------------------------------------------------------------
+
+def rolling_returns(
+    quant: QuantAnalytics,
+    symbol: str,
+    hold_years: float = 5.0,
+    period: str = "20y",
+    compare_symbols: list[str] | None = None,
+) -> go.Figure:
+    """
+    Distribution and timeline of all N-year holding period returns.
+
+    Answers: "if I bought on any day in the last *period* and held for
+    *hold_years* years, what return would I have gotten?"
+
+    Three panels
+    ------------
+    Top    : timeline of returns by entry date — shows which eras were
+             great/terrible entry points. Colour = return magnitude.
+    Middle : histogram + KDE of all outcomes — full distribution shape.
+    Bottom : cumulative distribution — probability of achieving at least X%.
+
+    Parameters
+    ----------
+    hold_years       : holding period in years (default 5)
+    period           : lookback window — must be > hold_years (default "20y")
+    compare_symbols  : optional list to overlay on the histogram panel
+    """
+    from scipy.stats import gaussian_kde
+
+    stats  = quant.rolling_returns_stats(symbol, hold_years, period)
+    rets   = quant.rolling_returns(symbol, hold_years, period)
+
+    fig = make_subplots(
+        rows=3, cols=1,
+        row_heights=[0.38, 0.37, 0.25],
+        vertical_spacing=0.07,
+        subplot_titles=[
+            f"Return by entry date (hold {hold_years:.0f}y)",
+            "Distribution of all outcomes",
+            "Cumulative probability",
+        ],
+    )
+
+    # ── Panel 1: timeline coloured by return ──────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=rets.index,
+        y=rets.values,
+        mode="lines",
+        line=dict(width=0.8, color="rgba(55,138,221,0.3)"),
+        showlegend=False,
+        hovertemplate="%{x|%Y-%m-%d}<br>Return: %{y:.1%}<extra></extra>",
+    ), row=1, col=1)
+
+    # colour-coded scatter overlay
+    fig.add_trace(go.Scatter(
+        x=rets.index,
+        y=rets.values,
+        mode="markers",
+        marker=dict(
+            size=2,
+            color=rets.values,
+            colorscale=[[0, "#A32D2D"], [0.4, "#F4F3EF"],
+                        [0.6, "#F4F3EF"], [1, "#0F6E56"]],
+            cmin=-0.5, cmax=1.5,
+            showscale=True,
+            colorbar=dict(
+                title="Return",
+                thickness=10, len=0.35, y=0.82,
+                tickformat=".0%",
+                tickfont=dict(size=8, color="#888780"),
+                outlinewidth=0,
+            ),
+        ),
+        showlegend=False,
+        hoverinfo="skip",
+    ), row=1, col=1)
+
+    fig.add_hline(y=0, row=1, col=1,
+                  line=dict(color="#B4B2A9", width=0.8, dash="dash"))
+    fig.update_yaxes(tickformat=".0%", row=1, col=1,
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+    fig.update_xaxes(gridcolor="#D3D1C7", row=1, col=1,
+                     tickfont=dict(size=9, color="#888780"))
+
+    # ── Panel 2: histogram + KDE ──────────────────────────────────────────
+    all_series = {symbol: rets}
+    if compare_symbols:
+        for sym in compare_symbols:
+            try:
+                all_series[sym] = quant.rolling_returns(sym, hold_years, period)
+            except Exception:
+                pass
+
+    colors_hist = [_PALETTE[i] for i in range(len(all_series))]
+
+    for (sym, r), color in zip(all_series.items(), colors_hist):
+        fig.add_trace(go.Histogram(
+            x=r.values,
+            histnorm="probability density",
+            nbinsx=60,
+            marker_color=color,
+            opacity=0.3,
+            name=sym,
+            hovertemplate=f"<b>{sym}</b><br>Return: %{{x:.1%}}<br>Density: %{{y:.2f}}<extra></extra>",
+        ), row=2, col=1)
+
+        kde_x = np.linspace(r.min(), r.max(), 300)
+        kde_y = gaussian_kde(r.values)(kde_x)
+        fig.add_trace(go.Scatter(
+            x=kde_x, y=kde_y,
+            mode="lines",
+            line=dict(color=color, width=2),
+            showlegend=False,
+            hoverinfo="skip",
+        ), row=2, col=1)
+
+    fig.add_vline(x=0, row=2, col=1,
+                  line=dict(color="#B4B2A9", width=0.8, dash="dash"))
+    fig.add_vline(x=stats["mean_return"], row=2, col=1,
+                  line=dict(color=_PALETTE[0], width=1.5),
+                  annotation=dict(
+                      text=f"mean {stats['mean_return']:+.0%}",
+                      font=dict(size=9, color=_PALETTE[0])))
+    fig.add_vline(x=stats["median_return"], row=2, col=1,
+                  line=dict(color=_PALETTE[0], width=1.5, dash="dot"),
+                  annotation=dict(
+                      text=f"median {stats['median_return']:+.0%}",
+                      font=dict(size=9, color=_PALETTE[0]),
+                      yshift=-20))
+
+    fig.update_xaxes(tickformat=".0%", row=2, col=1,
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+    fig.update_yaxes(title_text="Density", row=2, col=1,
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+    fig.update_layout(barmode="overlay")
+
+    # ── Panel 3: cumulative distribution ──────────────────────────────────
+    sorted_rets = np.sort(rets.values)
+    cum_prob    = np.arange(1, len(sorted_rets) + 1) / len(sorted_rets)
+
+    fig.add_trace(go.Scatter(
+        x=sorted_rets, y=cum_prob,
+        mode="lines",
+        line=dict(color=_PALETTE[0], width=2),
+        showlegend=False,
+        hovertemplate="Return ≥ %{x:.1%}<br>Probability: %{y:.1%}<extra></extra>",
+    ), row=3, col=1)
+
+    # mark key thresholds
+    for threshold, label in [(0, "break-even"), (0.5, "+50%"), (1.0, "+100% (2x)")]:
+        p = float((rets >= threshold).mean())
+        fig.add_vline(x=threshold, row=3, col=1,
+                      line=dict(color="#D3D1C7", width=0.8, dash="dot"))
+        fig.add_annotation(
+            x=threshold, y=1.05, xref="x3", yref="y3",
+            text=f"{p:.0%}", showarrow=False,
+            font=dict(size=8, color="#888780"),
+        )
+
+    fig.update_xaxes(tickformat=".0%", row=3, col=1,
+                     title_text=f"{hold_years:.0f}-year total return",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+    fig.update_yaxes(tickformat=".0%", row=3, col=1,
+                     title_text="P(return ≤ x)",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+
+    # ── annotation box ────────────────────────────────────────────────────
+    m = stats
+    ann = (
+        f"<b>{symbol} — {hold_years:.0f}y hold  ({m['n_entries']:,} entry dates)</b><br>"
+        f"Mean: {m['mean_return']:+.1%}   CAGR: {m['cagr_mean']:+.1%}/yr<br>"
+        f"Median: {m['median_return']:+.1%}   Std: {m['std_return']:.1%}<br>"
+        f"Win rate: {m['win_rate']:.0%}   "
+        f"Prob 2x: {m['prob_double']:.0%}   "
+        f"Prob halve: {m['prob_halve']:.0%}<br>"
+        f"Best entry: {m['best_entry']} ({m['max_return']:+.0%})<br>"
+        f"Worst entry: {m['worst_entry']} ({m['min_return']:+.0%})"
+    )
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.01, y=0.995,
+        text=ann, showarrow=False, align="left",
+        font=dict(size=10, color="#5F5E5A"),
+        bgcolor="rgba(255,255,255,0.88)",
+        bordercolor="#D3D1C7", borderwidth=0.5, borderpad=8,
+    )
+
+    _apply_layout(
+        fig,
+        title=f"{symbol} — Rolling {hold_years:.0f}-year holding period returns",
+        subtitle=f"every possible entry date in the last {_period_label(period)}  ·  "
+                 f"{m['n_entries']:,} scenarios",
+    )
+    fig.update_layout(height=750, hovermode="x unified")
+    return fig

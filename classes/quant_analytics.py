@@ -991,6 +991,147 @@ class QuantAnalytics:
         return pivot
 
     # ------------------------------------------------------------------
+    # Rolling return analysis
+    # ------------------------------------------------------------------
+
+    def rolling_returns(
+        self,
+        symbol: str,
+        hold_years: float = 5.0,
+        period: str = "20y",
+    ) -> pd.Series:
+        """
+        Rolling N-year holding period returns.
+
+        For every trading day in the last *period* of history, computes
+        the total return of buying on that day and holding for exactly
+        *hold_years* years. Returns a Series indexed by entry date.
+
+        This answers: "if I had bought on any random day in the last 20
+        years and held for N years, what return would I have gotten?"
+
+        Parameters
+        ----------
+        symbol     : ticker
+        hold_years : holding period in years (e.g. 1, 3, 5, 10)
+        period     : history window — should be longer than hold_years
+                     so there are meaningful entry dates (default "20y")
+
+        Returns
+        -------
+        pd.Series  index = entry date, value = total return over hold_years
+                   e.g. 0.45 means +45% over the holding period
+                   NaN entries are dropped (insufficient forward data)
+
+        Example
+        -------
+        rets = qa.rolling_returns("SPY", hold_years=5, period="20y")
+        print(f"Avg 5y return: {rets.mean():.1%}")
+        print(f"Win rate:      {(rets > 0).mean():.1%}")
+        """
+        prices      = self._prices(symbol, period=period)
+        hold_days   = int(hold_years * self.trading_days)
+
+        # total return from each entry date to hold_days later
+        future_price   = prices.shift(-hold_days)
+        total_return   = (future_price - prices) / prices
+
+        # drop entries where we don't have hold_days of forward data
+        return total_return.dropna().rename(f"{symbol}_{hold_years}y_return")
+
+    def rolling_returns_stats(
+        self,
+        symbol: str,
+        hold_years: float = 5.0,
+        period: str = "20y",
+    ) -> dict:
+        """
+        Summary statistics for rolling N-year holding period returns.
+
+        Answers the full picture of: "if I bought on any day in the
+        last *period* and held for *hold_years*, what happened?"
+
+        Returns
+        -------
+        dict with keys:
+          symbol          : ticker
+          hold_years      : holding period used
+          n_entries       : number of valid entry dates
+          mean_return     : average total return across all entry dates
+          median_return   : median total return
+          std_return      : standard deviation of outcomes
+          min_return      : worst possible entry (bad timing)
+          max_return      : best possible entry (perfect timing)
+          win_rate        : fraction of entry dates with positive return
+          pct_10          : 10th percentile (bad but not worst)
+          pct_25          : 25th percentile
+          pct_75          : 75th percentile
+          pct_90          : 90th percentile (good but not best)
+          best_entry      : date of best entry
+          worst_entry     : date of worst entry
+          cagr_mean       : mean return annualised (mean_return / hold_years approx)
+          prob_double     : probability of doubling your money (+100%)
+          prob_halve      : probability of losing half your money (-50%)
+        """
+        rets = self.rolling_returns(symbol, hold_years, period)
+        if rets.empty:
+            raise ValueError(f"No valid rolling returns for {symbol} "
+                             f"with {hold_years}y hold in {period} window")
+
+        cagr_mean = (1 + rets.mean()) ** (1 / hold_years) - 1
+
+        return {
+            "symbol":       symbol,
+            "hold_years":   hold_years,
+            "n_entries":    len(rets),
+            "mean_return":  float(rets.mean()),
+            "median_return":float(rets.median()),
+            "std_return":   float(rets.std()),
+            "min_return":   float(rets.min()),
+            "max_return":   float(rets.max()),
+            "win_rate":     float((rets > 0).mean()),
+            "pct_10":       float(rets.quantile(0.10)),
+            "pct_25":       float(rets.quantile(0.25)),
+            "pct_75":       float(rets.quantile(0.75)),
+            "pct_90":       float(rets.quantile(0.90)),
+            "best_entry":   rets.idxmax().date(),
+            "worst_entry":  rets.idxmin().date(),
+            "cagr_mean":    float(cagr_mean),
+            "prob_double":  float((rets >= 1.0).mean()),
+            "prob_halve":   float((rets <= -0.5).mean()),
+        }
+
+    def rolling_returns_bulk(
+        self,
+        symbols: list[str],
+        hold_years: float = 5.0,
+        period: str = "20y",
+    ) -> pd.DataFrame:
+        """
+        Compare rolling N-year returns across multiple symbols.
+
+        Returns a DataFrame (stats × symbols) sorted by mean_return
+        descending — useful for comparing which stocks rewarded patience
+        most consistently.
+
+        Example
+        -------
+        df = qa.rolling_returns_bulk(["AAPL","MSFT","NVDA","SPY"], hold_years=5)
+        print(df.loc[["mean_return","win_rate","worst_entry"]].T)
+        """
+        rows = {}
+        for sym in symbols:
+            try:
+                rows[sym] = self.rolling_returns_stats(sym, hold_years, period)
+            except Exception as e:
+                print(f"Skipping {sym}: {e}")
+
+        df = pd.DataFrame(rows)
+        # sort by mean_return descending
+        return df.T.sort_values("mean_return", ascending=False).T
+
+
+    # ------------------------------------------------------------------
     # Kelly Criterion
     # ------------------------------------------------------------------
 
