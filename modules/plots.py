@@ -3056,3 +3056,406 @@ def sp500_concentration(sp, top_n: int = 50) -> go.Figure:
     )
     fig.update_layout(height=800)
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Missing best/worst days impact
+# ---------------------------------------------------------------------------
+
+def best_worst_days(
+    quant: QuantAnalytics,
+    symbol: str,
+    period: str = "20y",
+    miss_scenarios: list[int] | None = None,
+    initial_value: float = 10_000.0,
+) -> go.Figure:
+    """
+    "Cost of missing the best days" visualisation — two panels.
+
+    Panel 1 (bar): final portfolio value for each scenario
+                   Buy & Hold vs miss-best vs miss-worst
+    Panel 2 (scatter): best and worst individual trading days on a timeline
+                       — shows they cluster around market crises
+
+    The key message: missing just the 10 best days typically cuts
+    returns in half. Those days cluster near the worst days, so
+    trying to time the market is a double-edged sword.
+    """
+    df     = quant.best_worst_days_impact(symbol, period, miss_scenarios,
+                                           initial_value)
+    detail = quant.best_worst_days_detail(symbol, period, n=20)
+
+    bh_row    = df[df["type"] == "buy_and_hold"].iloc[0]
+    bh_final  = bh_row["final_value"]
+    miss_best = df[df["type"] == "miss_best"].sort_values("days_missed")
+    miss_wrst = df[df["type"] == "miss_worst"].sort_values("days_missed")
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.58, 0.42],
+        vertical_spacing=0.10,
+        subplot_titles=[
+            f"Final value of ${initial_value:,.0f} invested — {_period_label(period)}",
+            "When did the best and worst days occur?",
+        ],
+    )
+
+    # ── Panel 1: bar chart ────────────────────────────────────────────────
+    # buy & hold reference line
+    fig.add_hline(y=bh_final, row=1, col=1,
+                  line=dict(color="#2C2C2A", width=1.5, dash="dash"),
+                  annotation=dict(
+                      text=f"Buy & Hold ${bh_final:,.0f}",
+                      font=dict(size=9, color="#2C2C2A"),
+                      xanchor="left",
+                  ))
+
+    # miss best bars
+    fig.add_trace(go.Bar(
+        x=[f"Miss best<br>{n}d" for n in miss_best["days_missed"]],
+        y=miss_best["final_value"],
+        name="Miss best N days",
+        marker_color="#E24B4A",
+        text=[f"${v:,.0f}" for v in miss_best["final_value"]],
+        textposition="outside",
+        textfont=dict(size=9),
+        customdata=miss_best[["days_missed", "total_return", "cagr",
+                               "vs_buy_hold"]].values,
+        hovertemplate=(
+            "<b>Miss best %{customdata[0]} days</b><br>"
+            "Final value: $%{y:,.0f}<br>"
+            "Total return: %{customdata[1]:.1%}<br>"
+            "CAGR: %{customdata[2]:.2%}<br>"
+            "vs Buy & Hold: $%{customdata[3]:,.0f}"
+            "<extra></extra>"
+        ),
+    ), row=1, col=1)
+
+    # miss worst bars
+    fig.add_trace(go.Bar(
+        x=[f"Miss worst<br>{n}d" for n in miss_wrst["days_missed"]],
+        y=miss_wrst["final_value"],
+        name="Miss worst N days",
+        marker_color="#1D9E75",
+        text=[f"${v:,.0f}" for v in miss_wrst["final_value"]],
+        textposition="outside",
+        textfont=dict(size=9),
+        customdata=miss_wrst[["days_missed", "total_return", "cagr",
+                               "vs_buy_hold"]].values,
+        hovertemplate=(
+            "<b>Miss worst %{customdata[0]} days</b><br>"
+            "Final value: $%{y:,.0f}<br>"
+            "Total return: %{customdata[1]:.1%}<br>"
+            "CAGR: %{customdata[2]:.2%}<br>"
+            "vs Buy & Hold: +$%{customdata[3]:,.0f}"
+            "<extra></extra>"
+        ),
+    ), row=1, col=1)
+
+    # buy & hold dot
+    fig.add_trace(go.Scatter(
+        x=["Buy &<br>Hold"],
+        y=[bh_final],
+        mode="markers+text",
+        marker=dict(size=14, symbol="diamond", color="#2C2C2A",
+                    line=dict(color="white", width=1.5)),
+        text=[f"${bh_final:,.0f}"],
+        textposition="top center",
+        textfont=dict(size=9),
+        name=f"Buy & Hold ({bh_row['cagr']:.1%}/yr)",
+        hovertemplate=(
+            f"<b>Buy & Hold</b><br>"
+            f"Final: ${bh_final:,.0f}<br>"
+            f"CAGR: {bh_row['cagr']:.2%}"
+            "<extra></extra>"
+        ),
+    ), row=1, col=1)
+
+    fig.update_yaxes(
+        title_text=f"Final value ($)",
+        tickformat="$,.0f",
+        gridcolor="#D3D1C7",
+        tickfont=dict(size=9, color="#888780"),
+        row=1, col=1,
+    )
+    fig.update_xaxes(
+        tickfont=dict(size=9, color="#5F5E5A"),
+        row=1, col=1,
+    )
+
+    # ── Panel 2: timeline of best and worst days ──────────────────────────
+    best_days  = detail[detail["type"] == "best"]
+    worst_days = detail[detail["type"] == "worst"]
+
+    fig.add_trace(go.Scatter(
+        x=best_days["date"],
+        y=best_days["return"],
+        mode="markers",
+        marker=dict(size=10, color="#1D9E75",
+                    line=dict(color="white", width=1)),
+        name="Best days",
+        customdata=best_days[["date", "return"]].values,
+        hovertemplate=(
+            "<b>Best day</b><br>"
+            "%{x|%Y-%m-%d}<br>"
+            "Return: %{y:.2%}<extra></extra>"
+        ),
+    ), row=2, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=worst_days["date"],
+        y=worst_days["return"],
+        mode="markers",
+        marker=dict(size=10, color="#E24B4A",
+                    line=dict(color="white", width=1)),
+        name="Worst days",
+        hovertemplate=(
+            "<b>Worst day</b><br>"
+            "%{x|%Y-%m-%d}<br>"
+            "Return: %{y:.2%}<extra></extra>"
+        ),
+    ), row=2, col=1)
+
+    fig.add_hline(y=0, row=2, col=1,
+                  line=dict(color="#B4B2A9", width=0.8, dash="dash"))
+
+    fig.update_xaxes(
+        type="date", tickformat="%Y",
+        gridcolor="#D3D1C7",
+        tickfont=dict(size=9, color="#888780"),
+        row=2, col=1,
+    )
+    fig.update_yaxes(
+        title_text="Daily return",
+        tickformat=".0%",
+        gridcolor="#D3D1C7",
+        tickfont=dict(size=9, color="#888780"),
+        row=2, col=1,
+    )
+
+    # annotation box
+    n_days   = int(df["n_trading_days"].iloc[0])
+    ann = (
+        f"<b>{symbol} — {_period_label(period)}</b><br>"
+        f"{n_days:,} trading days<br>"
+        f"Buy & Hold: ${bh_final:,.0f}  ({bh_row['cagr']:.1%}/yr)<br>"
+        f"Miss best 10d: ${miss_best[miss_best['days_missed']==10]['final_value'].values[0]:,.0f}  "
+        f"({miss_best[miss_best['days_missed']==10]['cagr'].values[0]:.1%}/yr)"
+        if 10 in miss_best["days_missed"].values else ""
+    )
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.01, y=0.99,
+        text=ann, showarrow=False, align="left",
+        font=dict(size=10, color="#5F5E5A"),
+        bgcolor="rgba(255,255,255,0.88)",
+        bordercolor="#D3D1C7", borderwidth=0.5, borderpad=8,
+    )
+
+    _apply_layout(
+        fig,
+        title=f"{symbol} — Cost of missing the best days",
+        subtitle=(
+            f"${initial_value:,.0f} invested  ·  {_period_label(period)}  ·  "
+            "red = miss best days (costly)  ·  green = miss worst days (lucky)"
+        ),
+    )
+    fig.update_layout(height=700, barmode="group")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Temporal concentration of best and worst days
+# ---------------------------------------------------------------------------
+
+def extreme_days_concentration(
+    quant: QuantAnalytics,
+    symbol: str,
+    period: str = "20y",
+    n: int = 50,
+    window: int = 63,           # rolling window in trading days (~1 quarter)
+) -> go.Figure:
+    """
+    Shows HOW CLOSE IN TIME the best and worst trading days are to each other.
+
+    Three panels
+    ------------
+    Top    : price chart with best (green) and worst (red) days marked
+    Middle : rolling density — how many extreme days fall in each window
+             Shows that crises produce clusters of both best AND worst days
+    Bottom : gap in days between each extreme day and the nearest opposite
+             extreme day (best near a worst, worst near a best)
+             A small gap = they happened close together
+
+    The key insight: the best days are almost always within days or weeks
+    of the worst days. You cannot avoid the bad without missing the good.
+
+    Parameters
+    ----------
+    n      : number of best/worst days to include (default 50)
+    window : rolling window in trading days for density count (default 63 = 1 quarter)
+    """
+    prices = quant._prices(symbol, period=period)
+    rets   = prices.pct_change().dropna()
+
+    best_days  = rets.nlargest(n)
+    worst_days = rets.nsmallest(n)
+
+    all_dates  = rets.index
+
+    # ── rolling density ────────────────────────────────────────────────────
+    # for each date, count how many best/worst days fall in the surrounding window
+    is_best  = all_dates.isin(best_days.index).astype(float)
+    is_worst = all_dates.isin(worst_days.index).astype(float)
+
+    best_density  = pd.Series(is_best,  index=all_dates).rolling(window).sum()
+    worst_density = pd.Series(is_worst, index=all_dates).rolling(window).sum()
+
+    # ── gap analysis ───────────────────────────────────────────────────────
+    # for each best day, find the nearest worst day (in trading days)
+    best_idx  = [all_dates.get_loc(d) for d in best_days.index]
+    worst_idx = [all_dates.get_loc(d) for d in worst_days.index]
+
+    def _nearest_gap(src_indices, tgt_indices):
+        gaps = []
+        for i in src_indices:
+            diffs = [abs(i - j) for j in tgt_indices]
+            gaps.append(min(diffs))
+        return gaps
+
+    best_gaps  = _nearest_gap(best_idx,  worst_idx)   # best day → nearest worst day
+    worst_gaps = _nearest_gap(worst_idx, best_idx)    # worst day → nearest best day
+
+    # ── plot ───────────────────────────────────────────────────────────────
+    fig = make_subplots(
+        rows=3, cols=1,
+        row_heights=[0.35, 0.35, 0.30],
+        vertical_spacing=0.07,
+        subplot_titles=[
+            f"Price with top-{n} best (▲) and worst (▼) days",
+            f"Rolling {window}-day density of extreme days",
+            f"Gap (trading days) between each extreme day and nearest opposite",
+        ],
+        shared_xaxes=False,
+    )
+
+    # ── Panel 1: price + marked days ──────────────────────────────────────
+    px_dates = prices.index.strftime("%Y-%m-%d").tolist()
+
+    fig.add_trace(go.Scatter(
+        x=px_dates, y=prices.values,
+        mode="lines",
+        line=dict(color="#B4B2A9", width=1.2),
+        showlegend=False,
+        hovertemplate="%{x}<br>Price: $%{y:,.2f}<extra></extra>",
+    ), row=1, col=1)
+
+    # best days
+    fig.add_trace(go.Scatter(
+        x=best_days.index.strftime("%Y-%m-%d").tolist(),
+        y=prices.reindex(best_days.index).values,
+        mode="markers",
+        marker=dict(size=7, color="#1D9E75", symbol="triangle-up",
+                    line=dict(color="white", width=0.5)),
+        name=f"Top {n} best days",
+        hovertemplate="%{x}<br>Return: %{customdata:.2%}<extra>Best day</extra>",
+        customdata=best_days.values,
+    ), row=1, col=1)
+
+    # worst days
+    fig.add_trace(go.Scatter(
+        x=worst_days.index.strftime("%Y-%m-%d").tolist(),
+        y=prices.reindex(worst_days.index).values,
+        mode="markers",
+        marker=dict(size=7, color="#E24B4A", symbol="triangle-down",
+                    line=dict(color="white", width=0.5)),
+        name=f"Top {n} worst days",
+        hovertemplate="%{x}<br>Return: %{customdata:.2%}<extra>Worst day</extra>",
+        customdata=worst_days.values,
+    ), row=1, col=1)
+
+    fig.update_yaxes(title_text="Price ($)", tickformat="$,.0f",
+                     gridcolor="#D3D1C7", tickfont=dict(size=9, color="#888780"),
+                     row=1, col=1)
+    fig.update_xaxes(gridcolor="#D3D1C7", tickfont=dict(size=9, color="#888780"),
+                     row=1, col=1)
+
+    # ── Panel 2: rolling density ──────────────────────────────────────────
+    density_dates = best_density.index.strftime("%Y-%m-%d").tolist()
+
+    fig.add_trace(go.Scatter(
+        x=density_dates, y=best_density.values,
+        mode="lines", fill="tozeroy",
+        fillcolor="rgba(29,158,117,0.20)",
+        line=dict(color="#1D9E75", width=1.5),
+        name=f"Best days per {window}d",
+        hovertemplate="%{x}<br>Best days in window: %{y:.0f}<extra></extra>",
+    ), row=2, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=density_dates, y=(-worst_density).values,
+        mode="lines", fill="tozeroy",
+        fillcolor="rgba(226,75,74,0.20)",
+        line=dict(color="#E24B4A", width=1.5),
+        name=f"Worst days per {window}d",
+        customdata=worst_density.values,
+        hovertemplate="%{x}<br>Worst days in window: %{customdata[0]:.0f}<extra></extra>",
+    ), row=2, col=1)
+
+    fig.add_hline(y=0, row=2, col=1,
+                  line=dict(color="#B4B2A9", width=0.8))
+    fig.update_yaxes(title_text="Days in window",
+                     gridcolor="#D3D1C7", tickfont=dict(size=9, color="#888780"),
+                     row=2, col=1)
+    fig.update_xaxes(gridcolor="#D3D1C7", tickfont=dict(size=9, color="#888780"),
+                     row=2, col=1)
+
+    # ── Panel 3: gap histogram ────────────────────────────────────────────
+    fig.add_trace(go.Histogram(
+        x=best_gaps,
+        nbinsx=30,
+        marker_color="#1D9E75",
+        opacity=0.7,
+        name="Best day → nearest worst day",
+        hovertemplate="Gap: %{x} days<br>Count: %{y}<extra>Best days</extra>",
+    ), row=3, col=1)
+
+    fig.add_trace(go.Histogram(
+        x=worst_gaps,
+        nbinsx=30,
+        marker_color="#E24B4A",
+        opacity=0.7,
+        name="Worst day → nearest best day",
+        hovertemplate="Gap: %{x} days<br>Count: %{y}<extra>Worst days</extra>",
+    ), row=3, col=1)
+
+    # median gap lines
+    med_best  = float(np.median(best_gaps))
+    med_worst = float(np.median(worst_gaps))
+    fig.add_vline(x=med_best, row=3, col=1,
+                  line=dict(color="#1D9E75", width=1.5, dash="dot"),
+                  annotation=dict(text=f"median {med_best:.0f}d",
+                                  font=dict(size=9, color="#1D9E75")))
+    fig.add_vline(x=med_worst, row=3, col=1,
+                  line=dict(color="#E24B4A", width=1.5, dash="dot"),
+                  annotation=dict(text=f"median {med_worst:.0f}d",
+                                  font=dict(size=9, color="#E24B4A"),
+                                  yshift=-20))
+
+    fig.update_xaxes(title_text="Gap (trading days)",
+                     gridcolor="#D3D1C7", tickfont=dict(size=9, color="#888780"),
+                     row=3, col=1)
+    fig.update_yaxes(title_text="Count",
+                     gridcolor="#D3D1C7", tickfont=dict(size=9, color="#888780"),
+                     row=3, col=1)
+
+    _apply_layout(
+        fig,
+        title=f"{symbol} — Temporal concentration of extreme days",
+        subtitle=(
+            f"Top {n} best and worst days  ·  {_period_label(period)}  ·  "
+            f"median gap best↔worst: {med_best:.0f} trading days"
+        ),
+    )
+    fig.update_layout(height=800, barmode="overlay",
+                      hovermode="x unified")
+    return fig

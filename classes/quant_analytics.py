@@ -1331,3 +1331,174 @@ class QuantAnalytics:
             weights = weights / weights.sum()
 
         return weights.sort_values(ascending=False).rename("kelly_weight")
+
+    # ------------------------------------------------------------------
+    # Missing best/worst days analysis
+    # ------------------------------------------------------------------
+
+    def best_worst_days_impact(
+        self,
+        symbol: str,
+        period: str = "20y",
+        miss_scenarios: list[int] | None = None,
+        initial_value: float = 10_000.0,
+    ) -> pd.DataFrame:
+        """
+        "Cost of missing the best days" study.
+
+        Computes what happens to a buy-and-hold investment if you were
+        out of the market on the N best (or worst) trading days.
+
+        This is one of the most compelling arguments for staying invested —
+        the best days tend to cluster around the worst days (crashes and
+        recoveries happen close together), so trying to time the market
+        and missing just a handful of days can dramatically reduce returns.
+
+        Parameters
+        ----------
+        symbol         : ticker (typically a broad index ETF like "SPY")
+        period         : history window (default "20y")
+        miss_scenarios : list of N values to test (default [5, 10, 20, 30, 40, 50])
+        initial_value  : starting portfolio value (default 10,000)
+
+        Returns
+        -------
+        DataFrame with one row per scenario:
+          scenario          : description (e.g. "Miss best 10 days")
+          final_value       : ending portfolio value
+          total_return      : total return over the period
+          cagr              : annualised compound return
+          vs_buy_hold       : difference in final value vs buy-and-hold
+          days_missed       : number of best days missed
+          type              : "buy_and_hold" | "miss_best" | "miss_worst"
+
+        The DataFrame also includes:
+          - "Buy & Hold" baseline row
+          - Miss best N days (reduced returns — cost of being out)
+          - Miss worst N days (improved returns — lucky avoidance)
+
+        Example
+        -------
+        df = qa.best_worst_days_impact("SPY", period="20y")
+        print(df[["scenario","final_value","total_return","cagr"]])
+        """
+        miss_scenarios = miss_scenarios or [5, 10, 20, 30, 40, 50]
+
+        prices     = self._prices(symbol, period=period)
+        rets       = prices.pct_change().dropna()
+        n_days     = len(rets)
+        n_years    = n_days / self.trading_days
+
+        def _terminal(returns_series) -> tuple[float, float, float]:
+            final   = initial_value * (1 + returns_series).cumprod().iloc[-1]
+            total_r = final / initial_value - 1
+            cagr    = (1 + total_r) ** (1 / n_years) - 1 if n_years > 0 else 0.0
+            return float(final), float(total_r), float(cagr)
+
+        rows = []
+
+        # buy & hold baseline
+        bh_final, bh_ret, bh_cagr = _terminal(rets)
+        rows.append({
+            "scenario":    "Buy & Hold",
+            "days_missed": 0,
+            "final_value": bh_final,
+            "total_return":bh_ret,
+            "cagr":        bh_cagr,
+            "vs_buy_hold": 0.0,
+            "type":        "buy_and_hold",
+        })
+
+        # miss best N days
+        sorted_best = rets.sort_values(ascending=False)
+        for n in miss_scenarios:
+            best_days   = sorted_best.head(n).index
+            adj_rets    = rets.copy()
+            adj_rets[best_days] = 0.0
+            final, total_r, cagr = _terminal(adj_rets)
+            rows.append({
+                "scenario":    f"Miss best {n} days",
+                "days_missed": n,
+                "final_value": final,
+                "total_return":total_r,
+                "cagr":        cagr,
+                "vs_buy_hold": final - bh_final,
+                "type":        "miss_best",
+            })
+
+        # miss worst N days
+        sorted_worst = rets.sort_values(ascending=True)
+        for n in miss_scenarios:
+            worst_days  = sorted_worst.head(n).index
+            adj_rets    = rets.copy()
+            adj_rets[worst_days] = 0.0
+            final, total_r, cagr = _terminal(adj_rets)
+            rows.append({
+                "scenario":    f"Miss worst {n} days",
+                "days_missed": n,
+                "final_value": final,
+                "total_return":total_r,
+                "cagr":        cagr,
+                "vs_buy_hold": final - bh_final,
+                "type":        "miss_worst",
+            })
+
+        df = pd.DataFrame(rows)
+
+        # add metadata
+        df["symbol"]        = symbol
+        df["period"]        = period
+        df["n_trading_days"]= n_days
+        df["initial_value"] = initial_value
+
+        return df
+
+    def best_worst_days_detail(
+        self,
+        symbol: str,
+        period: str = "20y",
+        n: int = 20,
+    ) -> pd.DataFrame:
+        """
+        Return the N best and N worst individual trading days.
+
+        Useful for seeing WHEN the extreme days occurred —
+        they almost always cluster around crises (2008, 2020, 2022),
+        which is why timing the market is so hard.
+
+        Returns
+        -------
+        DataFrame sorted by return descending:
+          date      : trading date
+          return    : daily return
+          rank      : 1 = best day, -1 = worst day
+          type      : "best" | "worst"
+        """
+        prices = self._prices(symbol, period=period)
+        rets   = prices.pct_change().dropna()
+
+        best  = (rets.nlargest(n)
+                     .reset_index()
+                     .rename(columns={"date": "date", symbol: "return",
+                                      rets.name: "return", 0: "return"}))
+        worst = (rets.nsmallest(n)
+                     .reset_index()
+                     .rename(columns={"date": "date", symbol: "return",
+                                      rets.name: "return", 0: "return"}))
+
+        # handle Series with name
+        def _to_df(s, kind):
+            df = s.reset_index()
+            df.columns = ["date", "return"]
+            df["type"] = kind
+            return df
+
+        best_df  = _to_df(rets.nlargest(n),  "best")
+        worst_df = _to_df(rets.nsmallest(n), "worst")
+
+        combined = pd.concat([best_df, worst_df]).sort_values(
+            "return", ascending=False
+        ).reset_index(drop=True)
+        combined.index = combined.index + 1
+        combined.index.name = "rank"
+        return combined
