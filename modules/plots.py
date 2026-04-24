@@ -2867,3 +2867,192 @@ def rolling_returns(
     )
     fig.update_layout(height=750, hovermode="x unified")
     return fig
+
+
+# ---------------------------------------------------------------------------
+# S&P 500 concentration
+# ---------------------------------------------------------------------------
+
+def sp500_concentration(sp, top_n: int = 50) -> go.Figure:
+    """
+    Four-panel ETF concentration analysis.
+
+    Panel 1 (bar)    : top-N holdings by weight with sector colour coding
+    Panel 2 (line)   : cumulative weight curve — how many holdings = X% of ETF
+    Panel 3 (bar)    : sector weights
+    Panel 4 (metrics): HHI, effective N, Gini, key thresholds
+
+    sp    : ETFConcentration instance (already fetched)
+    top_n : number of holdings to show in the top bar (default 50)
+
+    Example
+    -------
+    from modules.etf import ETFConcentration
+    sp  = ETFConcentration("SPY").fetch()
+    qqq = ETFConcentration("QQQ").fetch()
+    plots.sp500_concentration(sp).show()
+    plots.sp500_concentration(qqq, top_n=20).show()
+    """
+    from modules.etf import ETFConcentration
+
+    df      = sp.weights()
+    top_df  = sp.top_n(top_n)
+    sectors = sp.sector_weights()
+    cumw    = sp.cumulative_weight()
+    metrics = sp.concentration_metrics()
+
+    # sector colour palette
+    unique_sectors = df["sector"].dropna().unique().tolist()
+    sector_colors  = {s: _PALETTE[i % len(_PALETTE)]
+                      for i, s in enumerate(sorted(unique_sectors))}
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=[
+            f"Top {top_n} holdings by weight",
+            "Cumulative weight curve",
+            "Sector weights",
+            "Concentration metrics",
+        ],
+        vertical_spacing=0.14,
+        horizontal_spacing=0.10,
+    )
+
+    # ── Panel 1: top-N bar chart ──────────────────────────────────────────
+    bar_colors = [sector_colors.get(s, "#888780")
+                  for s in top_df["sector"].fillna("Unknown")]
+
+    # build customdata with available columns (market_cap may not be present)
+    hover_cols = ["name", "sector"]
+    custom     = top_df[hover_cols].values
+    fig.add_trace(go.Bar(
+        x=top_df["symbol"],
+        y=top_df["weight_pct"],
+        marker_color=bar_colors,
+        showlegend=False,
+        customdata=custom,
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "%{customdata[0]}<br>"
+            "Sector: %{customdata[1]}<br>"
+            "Weight: %{y:.2f}%<extra></extra>"
+        ),
+    ), row=1, col=1)
+
+    fig.update_xaxes(tickfont=dict(size=8, color="#888780"),
+                     tickangle=-60, row=1, col=1)
+    fig.update_yaxes(title_text="Weight (%)", row=1, col=1,
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+
+    # ── Panel 2: cumulative weight curve ─────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=list(range(1, len(cumw) + 1)),
+        y=cumw.values * 100,
+        mode="lines",
+        line=dict(color=_PALETTE[0], width=2),
+        showlegend=False,
+        hovertemplate="Top %{x} stocks<br>Cumulative weight: %{y:.1f}%<extra></extra>",
+    ), row=1, col=2)
+
+    # mark key thresholds
+    for pct in [25, 50, 75]:
+        n_stocks = sp.holdings_for_pct(pct / 100)
+        fig.add_hline(y=pct, row=1, col=2,
+                      line=dict(color="#D3D1C7", width=0.8, dash="dot"))
+        fig.add_vline(x=n_stocks, row=1, col=2,
+                      line=dict(color="#D3D1C7", width=0.8, dash="dot"))
+        fig.add_annotation(
+            x=n_stocks, y=pct,
+            xref="x2", yref="y2",
+            text=f" {n_stocks} stocks = {pct}%",
+            showarrow=False,
+            font=dict(size=8, color="#888780"),
+            xanchor="left",
+        )
+
+    fig.update_xaxes(title_text="Number of stocks (ranked by weight)",
+                     row=1, col=2,
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+    fig.update_yaxes(title_text="Cumulative weight (%)",
+                     row=1, col=2,
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+
+    # ── Panel 3: sector weights ───────────────────────────────────────────
+    sec_colors = [sector_colors.get(s, "#888780")
+                  for s in sectors.index]
+
+    fig.add_trace(go.Bar(
+        x=sectors.index,
+        y=sectors["weight"] * 100,
+        marker_color=sec_colors,
+        showlegend=False,
+        customdata=sectors[["n_holdings", "top_holding"]].values,
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Weight: %{y:.1f}%<br>"
+            "Holdings: %{customdata[0]}<br>"
+            "Largest: %{customdata[1]}<extra></extra>"
+        ),
+    ), row=2, col=1)
+
+    fig.update_xaxes(tickangle=-30,
+                     tickfont=dict(size=9, color="#888780"),
+                     row=2, col=1)
+    fig.update_yaxes(title_text="Weight (%)", row=2, col=1,
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=9, color="#888780"))
+
+    # ── Panel 4: metrics annotation ──────────────────────────────────────
+    m = metrics
+    hhi_label = ("unconcentrated" if m["hhi"] < 1500
+                 else "moderately concentrated" if m["hhi"] < 2500
+                 else "highly concentrated")
+
+    metric_lines = [
+        f"<b>Total holdings:</b> {m['total_holdings']}",
+        f"<b>Top 1:</b>  {m['largest_holding']} ({m['largest_weight']:.1%})",
+        f"<b>Top 5:</b>  {m.get('top_5_weight', float('nan')):.1%}",
+        f"<b>Top 10:</b> {m.get('top_10_weight', float('nan')):.1%}",
+        f"<b>Top 25:</b> {m.get('top_25_weight', float('nan')):.1%}",
+        f"<b>Top 50:</b> {m.get('top_50_weight', float('nan')):.1%}",
+        "",
+        f"<b>HHI:</b> {m['hhi']:.0f}  ({m['hhi_label']})",
+        f"<b>Effective N:</b> {m['effective_n']:.0f} holdings",
+        f"<b>Gini:</b> {m['gini']:.3f}",
+        "",
+        f"<b>Top sector:</b> {m['top_sector']}",
+        f"<b>Sector weight:</b> {m['top_sector_weight']:.1%}",
+        f"<b>Total weight covered:</b> {m['total_weight']:.1%}",
+        "",
+        f"<b>25% of ETF:</b> {sp.holdings_for_pct(0.25)} holdings",
+        f"<b>50% of ETF:</b> {sp.holdings_for_pct(0.50)} holdings",
+        f"<b>75% of ETF:</b> {sp.holdings_for_pct(0.75)} holdings",
+    ]
+
+    fig.add_annotation(
+        xref="x4 domain", yref="y4 domain",
+        x=0.05, y=0.95,
+        text="<br>".join(metric_lines),
+        showarrow=False, align="left",
+        font=dict(size=11, color="#5F5E5A"),
+        bgcolor="rgba(255,255,255,0.0)",
+        borderwidth=0,
+    )
+    fig.update_xaxes(visible=False, row=2, col=2)
+    fig.update_yaxes(visible=False, row=2, col=2)
+
+    _apply_layout(
+        fig,
+        title=f"{sp.ticker} — ETF concentration analysis",
+        subtitle=(
+            f"{m['total_holdings']} holdings  ·  "
+            f"top 10 = {m.get('top_10_weight', 0):.1%} of ETF  ·  "
+            f"effective N = {m['effective_n']:.0f}  ·  "
+            f"HHI = {m['hhi']:.0f}"
+        ),
+    )
+    fig.update_layout(height=800)
+    return fig
