@@ -77,7 +77,7 @@ def sidebar() -> html.Div:
             style={
                 "width": "100%", "height": "80px",
                 "background": "#2C2C2A", "color": "white",
-                "border": f"1px solid #444441", "borderRadius": "6px",
+                "border": "1px solid #444441", "borderRadius": "6px",
                 "padding": "8px", "fontSize": "12px",
                 "resize": "none",
             },

@@ -298,7 +298,7 @@ class StockClient:
     @staticmethod
     def _slice_to_period(data: list, period: str) -> list:
         """Slice cached data to approximately cover *period* from the most recent bar."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta
 
         _period_days = {
             "1d": 1, "5d": 5, "1mo": 30, "3mo": 91, "6mo": 182,

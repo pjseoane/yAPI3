@@ -36,7 +36,6 @@ Usage
 from __future__ import annotations
 
 import io
-import time
 from typing import Callable
 
 import numpy as np
@@ -140,20 +139,6 @@ def _fetch_invesco(ticker: str) -> pd.DataFrame:
 
 def _fetch_ishares(ticker: str) -> pd.DataFrame:
     """iShares / BlackRock ETFs — full holdings CSV."""
-    # iShares uses a product-code based URL; try the direct CSV endpoint
-    url  = (f"https://www.ishares.com/us/products/etf-product-data/"
-            f"us/en/1467271812596.ajax?fileType=csv&dataType=fund"
-            f"&assetClass=equities")
-
-    # Alternative direct URL pattern
-    url2 = (f"https://www.ishares.com/us/literature/spreadsheet/"
-            f"15334.csv?fileType=csv&dataType=fund")
-
-    # Use the known working URL pattern
-    url3 = (f"https://www.ishares.com/us/products/"
-            f"239726/ishares-core-sp-500-etf/1467271812596.ajax"
-            f"?fileType=csv&includeAll=true")
-
     resp = requests.get(
         f"https://www.ishares.com/us/products/etf-product-data/"
         f"us/en/{ticker}/holdings",
@@ -163,8 +148,8 @@ def _fetch_ishares(ticker: str) -> pd.DataFrame:
 
     # parse as CSV, skip header rows
     lines = resp.text.splitlines()
-    start = next((i for i, l in enumerate(lines)
-                  if "ticker" in l.lower() or "symbol" in l.lower()), 0)
+    start = next((i for i, line in enumerate(lines)
+                  if "ticker" in line.lower() or "symbol" in line.lower()), 0)
 
     df = pd.read_csv(io.StringIO("\n".join(lines[start:])))
     col_map = {

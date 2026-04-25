@@ -87,7 +87,7 @@ def _fetch_ff(url: str) -> pd.DataFrame:
     # skip header lines until we find the date column
     lines = raw.splitlines()
     # find header row (immediately before first data line)
-    data_start = next(i for i, l in enumerate(lines) if l.strip()[:6].isdigit())
+    data_start = next(i for i, line in enumerate(lines) if line.strip()[:6].isdigit())
     header_start = max(0, data_start - 1)
     # find end of data block
     end = next(
@@ -179,7 +179,15 @@ class FactorResult:
         return df
 
     def __repr__(self) -> str:
-        sig = lambda p: "***" if p < 0.01 else "**" if p < 0.05 else "*" if p < 0.1 else ""
+        def sig(p: float) -> str:
+            if p < 0.01:
+                return "***"
+            if p < 0.05:
+                return "**"
+            if p < 0.1:
+                return "*"
+            return ""
+
         lines = [
             f"FactorResult — {self.symbol}  [{self.model.upper()}]  {self.period}",
             f"  Alpha (ann.)  : {self.alpha:+.3%} {sig(self.alpha_pval)}"

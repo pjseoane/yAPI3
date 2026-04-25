@@ -42,10 +42,19 @@ dev = [
     "black",
     "ruff",
     "mypy",
+    "build",
 ]
 
 [tool.setuptools.packages.find]
 include = ["yfinance_api3*"]
 
-[tool.setuptools.package-data]
-"yfinance_api3" = ["py.typed"]
+[tool.ruff]
+exclude = [
+    ".git",
+    ".idea",
+    ".venv",
+    "build",
+    "dist",
+    "notebooks",
+    "*.egg-info",
+]

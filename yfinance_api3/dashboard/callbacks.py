@@ -6,7 +6,7 @@ Separated from app.py to keep file sizes manageable.
 """
 from __future__ import annotations
 
-from dash import Input, Output, State, callback_context
+from dash import Input, Output, State
 import plotly.graph_objects as go
 
 from yfinance_api3.classes.stock_client import StockClient
@@ -76,16 +76,12 @@ def register(app, client: StockClient, quant: QuantAnalytics) -> None:
         prevent_initial_call=True,
     )
     def update_overview(n_clicks, symbols_raw, benchmark, period, rfr):
-        from dash import html
-        from yfinance_api3.dashboard.components import metric_card, COLORS
-
         symbols = _parse_symbols(symbols_raw)
         if not symbols:
             empty = _empty_fig("Enter symbols and click Run")
             return empty, empty, empty, [], "No symbols entered"
 
         try:
-            import traceback as _tb
             import dash_bootstrap_components as _dbc
             from yfinance_api3.dashboard.components import metric_card, COLORS
 
@@ -322,92 +318,3 @@ def register(app, client: StockClient, quant: QuantAnalytics) -> None:
         symbols = _parse_symbols(symbols_raw or "AAPL")
         opts = [{"label": s, "value": s} for s in symbols]
         return opts, (symbols[0] if symbols else None)
-
-    def _removed_sidebar_extra(active_tab, symbols_raw):
-        # removed — replaced by static controls in components.py
-        pass
-
-    def _placeholder():
-        # ALL dropdown IDs must always be present in the DOM —
-        # Dash requires every Input/State ID to exist before any
-        # callback that uses them can fire. Hidden ones serve as placeholders.
-        def _hidden(cid):
-            return dcc.Dropdown(id=cid, style={"display": "none"}, options=[])
-
-        label_style = {"color": "#D3D1C7", "fontSize": "12px",
-                       "marginTop": "12px", "display": "block"}
-        dd_style = {"fontSize": "12px"}
-
-        symbols = _parse_symbols(symbols_raw or "AAPL")
-
-        # always render all IDs — show only the relevant ones
-        season_visible   = active_tab == "tab-seasonality"
-        portfolio_visible = active_tab == "tab-portfolio"
-        factors_visible  = active_tab == "tab-factors"
-
-        return html.Div([
-
-            # ── Seasonality controls ──────────────────────────────────
-            html.Div([
-                html.Label("Symbol", style=label_style),
-                dcc.Dropdown(
-                    id="dd-season-symbol",
-                    options=[{"label": s, "value": s} for s in symbols],
-                    value=symbols[0] if symbols else None,
-                    clearable=False, style=dd_style,
-                ),
-                html.Label("Granularity", style=label_style),
-                dcc.Dropdown(
-                    id="dd-season-gran",
-                    options=[{"label": "Monthly", "value": "monthly"},
-                             {"label": "Weekly",  "value": "weekly"}],
-                    value="monthly", clearable=False, style=dd_style,
-                ),
-                html.Label("Long-term period", style=label_style),
-                dcc.Dropdown(
-                    id="dd-season-lt",
-                    options=[{"label": f"{n}y", "value": f"{n}y"}
-                             for n in [5, 10, 15, 20]],
-                    value="10y", clearable=False, style=dd_style,
-                ),
-                html.Label("Short-term period", style=label_style),
-                dcc.Dropdown(
-                    id="dd-season-st",
-                    options=[{"label": f"{n}y", "value": f"{n}y"}
-                             for n in [1, 2, 3, 5]],
-                    value="5y", clearable=False, style=dd_style,
-                ),
-            ], style={"display": "block" if season_visible else "none"}),
-
-            # ── Portfolio controls ────────────────────────────────────
-            html.Div([
-                html.Label("Backtest strategy", style=label_style),
-                dcc.Dropdown(
-                    id="dd-bt-strategy",
-                    options=[
-                        {"label": "Buy & Hold",     "value": "buy_hold"},
-                        {"label": "MA 20/50",        "value": "ma_20_50"},
-                        {"label": "MA 50/200",       "value": "ma_50_200"},
-                        {"label": "Momentum (63d)",  "value": "momentum"},
-                        {"label": "Mean Reversion",  "value": "mean_rev"},
-                    ],
-                    value="buy_hold", clearable=False, style=dd_style,
-                ),
-            ], style={"display": "block" if portfolio_visible else "none"}),
-
-            # ── Factor controls ───────────────────────────────────────
-            html.Div([
-                html.Label("Factor model", style=label_style),
-                dcc.Dropdown(
-                    id="dd-factor-model",
-                    options=[
-                        {"label": "FF3 (3-factor)",    "value": "ff3"},
-                        {"label": "FF5 (5-factor)",    "value": "ff5"},
-                        {"label": "FF3 + Momentum",    "value": "mom"},
-                        {"label": "FF6 (all factors)", "value": "ff6"},
-                    ],
-                    value="ff5", clearable=False, style=dd_style,
-                ),
-            ], style={"display": "block" if factors_visible else "none"}),
-
-        ])

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import dash
 import dash_bootstrap_components as dbc
-from dash import dcc, html
+from dash import html
 
 from yfinance_api3.classes.stock_client import StockClient
 from yfinance_api3.classes.quant_analytics import QuantAnalytics
@@ -33,6 +33,7 @@ from yfinance_api3.dashboard.components import (
     header, sidebar, plot_card, section_title, loading, COLORS
 )
 import logging
+
 logging.basicConfig(level=logging.DEBUG)
 
 # ---------------------------------------------------------------------------

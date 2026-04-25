@@ -2,14 +2,13 @@
 streamlit_app.py — Streamlit dashboard for yfinance_api3.
 
 Run with:
-    streamlit run yfinance_api3/dashboard/streamlit_app.py
+    streamlit run streamlit_app.py
 
 Dependencies:
     pip install streamlit
 """
 
 import streamlit as st
-import pandas as pd
 
 from yfinance_api3.classes.stock_client import StockClient
 from yfinance_api3.classes.quant_analytics import QuantAnalytics
@@ -152,19 +151,22 @@ with tab_overview:
         with st.spinner("Loading charts..."):
             fig = _safe(plots.cumulative_returns, quant, symbols,
                         period=period, label="Cumulative returns")
-            if fig: _show(fig)
+            if fig:
+                _show(fig)
 
             col1, col2 = st.columns(2)
             with col1:
                 fig = _safe(plots.drawdown, quant, symbols,
                             period=period, label="Drawdown")
-                if fig: _show(fig)
+                if fig:
+                    _show(fig)
             with col2:
                 fig = _safe(plots.metrics_bar, quant, symbols,
                             metric="sharpe", period=period,
                             benchmark=benchmark, risk_free_rate=rfr,
                             label="Sharpe bar")
-                if fig: _show(fig)
+                if fig:
+                    _show(fig)
 
 
 # ── Risk ────────────────────────────────────────────────────────────────────
@@ -179,28 +181,33 @@ with tab_risk:
             with col1:
                 fig = _safe(plots.rolling_volatility, quant, symbols,
                             period=period, label="Rolling vol")
-                if fig: _show(fig)
+                if fig:
+                    _show(fig)
             with col2:
                 fig = _safe(plots.rolling_sharpe, quant, symbols,
                             period=period, risk_free_rate=rfr,
                             label="Rolling Sharpe")
-                if fig: _show(fig)
+                if fig:
+                    _show(fig)
 
             col3, col4 = st.columns(2)
             with col3:
                 fig = _safe(plots.correlation_heatmap, quant, symbols,
                             period=period, label="Correlation")
-                if fig: _show(fig)
+                if fig:
+                    _show(fig)
             with col4:
                 fig = _safe(plots.returns_distribution, quant, symbols,
                             period=period, label="Return distribution")
-                if fig: _show(fig)
+                if fig:
+                    _show(fig)
 
             fig = _safe(plots.scatter, quant, symbols,
                         metric="sharpe", period_x="1y", period_y=period,
                         benchmark=benchmark, risk_free_rate=rfr,
                         label="Sharpe quadrant")
-            if fig: _show(fig)
+            if fig:
+                _show(fig)
 
 
 # ── Seasonality ─────────────────────────────────────────────────────────────
@@ -227,21 +234,25 @@ with tab_seasonality:
                 fig = _safe(plots.seasonality, quant, season_sym,
                             period=season_lt, granularity=season_gran,
                             label="Seasonality bar")
-                if fig: _show(fig)
+                if fig:
+                    _show(fig)
             with col2:
                 fig = _safe(plots.seasonality_box, quant, season_sym,
                             period=season_lt, granularity=season_gran,
                             label="Seasonality box")
-                if fig: _show(fig)
+                if fig:
+                    _show(fig)
 
             fig = _safe(plots.seasonality_comparison_clean, quant, season_sym,
                         long_term=season_lt, short_term=season_st,
                         label="Seasonality comparison")
-            if fig: _show(fig)
+            if fig:
+                _show(fig)
 
             fig = _safe(plots.seasonality_heatmap, quant, season_sym,
                         period=season_lt, label="Seasonality heatmap")
-            if fig: _show(fig)
+            if fig:
+                _show(fig)
 
 
 # ── Portfolio ────────────────────────────────────────────────────────────────
@@ -257,13 +268,15 @@ with tab_portfolio:
                                              period=period,
                                              risk_free_rate=rfr)
             ), label="Efficient frontier")
-            if fig: _show(fig)
+            if fig:
+                _show(fig)
 
         with st.spinner("Kelly analysis..."):
             fig = _safe(plots.kelly, quant, symbols,
                         period=period, risk_free_rate=rfr,
                         label="Kelly")
-            if fig: _show(fig)
+            if fig:
+                _show(fig)
 
         st.markdown("#### Backtest")
         bt_strategy = st.selectbox("Strategy", [
@@ -295,7 +308,8 @@ with tab_portfolio:
                 bc3.metric("Max DD",      f"{m['max_drawdown']:.1%}")
                 bc4.metric("Win rate",    f"{m['win_rate']:.0%}")
                 fig = _safe(plots.backtest, bt_result, label="Backtest")
-                if fig: _show(fig)
+                if fig:
+                    _show(fig)
             except Exception as e:
                 st.warning(f"Backtest: {e}")
 
@@ -334,13 +348,15 @@ with tab_factors:
             if len(factor_results) > 1:
                 fig = _safe(plots.factor_comparison, factor_results,
                             label="Factor comparison")
-                if fig: _show(fig)
+                if fig:
+                    _show(fig)
 
             for sym in symbols[:3]:   # limit rolling to first 3 to avoid timeout
                 fig = _safe(plots.rolling_factor_betas, quant, sym,
                             model=factor_model, period=period,
                             label=f"Rolling betas {sym}")
-                if fig: _show(fig)
+                if fig:
+                    _show(fig)
 
 
 # ---------------------------------------------------------------------------

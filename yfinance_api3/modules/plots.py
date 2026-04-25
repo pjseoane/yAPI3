@@ -30,6 +30,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 
 from yfinance_api3.classes.quant_analytics import QuantAnalytics
+from yfinance_api3.modules.factors import _FACTOR_LABELS
 
 
 # ---------------------------------------------------------------------------
@@ -696,8 +697,8 @@ def fundamentals_scatter(
 
     if hx == "text" or hy == "text":
         raise ValueError(
-            f"Text fields ('sector', 'industry') cannot be used as axes. "
-            f"They appear automatically in hover tooltips."
+            "Text fields ('sector', 'industry') cannot be used as axes. "
+            "They appear automatically in hover tooltips."
         )
 
     raw_info: dict[str, dict] = {}
@@ -1069,7 +1070,7 @@ def efficient_frontier(frontier, show_assets: bool = True) -> go.Figure:
                     line=dict(color="white", width=1.5)),
         text=["Min Var"], textposition="top right",
         textfont=dict(size=10, color="#378ADD"),
-        name=f"Min Variance",
+        name="Min Variance",
         hovertemplate=(
             "<b>Min Variance</b><br>"
             f"Sharpe: {mv.sharpe_ratio:.3f}<br>"
@@ -1585,9 +1586,6 @@ def seasonality_heatmap(
     """
     # weekly_seasonality returns (week × year) — transpose to (year × week)
     # handles arbitrary "Ny" periods via "max" fallback in weekly_seasonality
-    import datetime
-    current_year = datetime.date.today().year
-
     if period.endswith("y") and period[:-1].isdigit():
         n_years      = int(period[:-1])
         fetch_period = "max" if n_years > 10 else period
@@ -2128,15 +2126,7 @@ def factor_exposure(result, show_significance: bool = True) -> go.Figure:
     betas    = [result.betas[f] for f in factors]
     t_stats  = [result.t_stats[f] for f in factors]
     p_values = [result.p_values[f] for f in factors]
-    labels   = [_FACTOR_LABELS.get(f, f) if hasattr(result, '_dummy') else f
-                for f in factors]
-
-    # import label mapping from factors module
-    try:
-        from yfinance_api3.modules.factors import _FACTOR_LABELS
-        labels = [_FACTOR_LABELS.get(f, f) for f in factors]
-    except ImportError:
-        labels = factors
+    labels   = [_FACTOR_LABELS.get(f, f) for f in factors]
 
     colors  = ["#1D9E75" if b >= 0 else "#E24B4A" for b in betas]
     opacity = [0.9 if p < 0.05 else 0.45 for p in p_values]
@@ -2312,8 +2302,6 @@ def factor_comparison(
 
     for result, color in zip(results, _PALETTE):
         betas    = [result.betas[f] for f in factors]
-        p_values = [result.p_values[f] for f in factors]
-        opacity  = [0.9 if p < 0.05 else 0.4 for p in p_values]
 
         fig.add_trace(go.Bar(
             name=result.symbol,
@@ -2577,7 +2565,7 @@ def seasonality_box(
                 "1D9E75", "29,158,117,0.25)"
             ).replace(
                 "E24B4A", "226,75,74,0.25)"
-            ) if color in ("#1D9E75", "#E24B4A") else f"rgba(180,178,169,0.25)",
+            ) if color in ("#1D9E75", "#E24B4A") else "rgba(180,178,169,0.25)",
             boxmean=False,
             showlegend=False,
             hovertemplate=(
@@ -3005,9 +2993,6 @@ def sp500_concentration(sp, top_n: int = 50) -> go.Figure:
 
     # ── Panel 4: metrics annotation ──────────────────────────────────────
     m = metrics
-    hhi_label = ("unconcentrated" if m["hhi"] < 1500
-                 else "moderately concentrated" if m["hhi"] < 2500
-                 else "highly concentrated")
 
     metric_lines = [
         f"<b>Total holdings:</b> {m['total_holdings']}",
@@ -3170,7 +3155,7 @@ def best_worst_days(
     ), row=1, col=1)
 
     fig.update_yaxes(
-        title_text=f"Final value ($)",
+        title_text="Final value ($)",
         tickformat="$,.0f",
         gridcolor="#D3D1C7",
         tickfont=dict(size=9, color="#888780"),
@@ -3331,7 +3316,7 @@ def extreme_days_concentration(
         subplot_titles=[
             f"Price with top-{n} best (▲) and worst (▼) days",
             f"Rolling {window}-day density of extreme days",
-            f"Gap (trading days) between each extreme day and nearest opposite",
+            "Gap (trading days) between each extreme day and nearest opposite",
         ],
         shared_xaxes=False,
     )

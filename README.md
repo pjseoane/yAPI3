@@ -16,14 +16,38 @@ For local development:
 pip install -e .
 ```
 
+For dashboard development:
+
+```powershell
+pip install -e .[dashboard-dash]
+pip install -e .[dashboard-streamlit]
+```
+
+For linting, tests, and packaging tools:
+
+```powershell
+pip install -e .[dev]
+```
+
 Build a distributable wheel:
 
 ```powershell
-pip install build
 python -m build
 ```
 
 The built artifacts are created in `dist/`.
+
+Run the Dash app:
+
+```powershell
+python -m yfinance_api3.dashboard.app
+```
+
+Run the Streamlit app:
+
+```powershell
+streamlit run streamlit_app.py
+```
 
 ## Use In Another Project
 

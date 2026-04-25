@@ -604,9 +604,9 @@ def auto_report(
     11. Factor Exposure       — FF5 loadings + rolling betas (if include_factors)
     """
     import yfinance_api3.modules.plots as plots
-    from yfinance_api3 import modules as portfolio
+    import yfinance_api3.modules.portfolio as portfolio
     import yfinance_api3.modules.backtest as backtest
-    from yfinance_api3 import modules as montecarlo
+    import yfinance_api3.modules.montecarlo as montecarlo
 
     r = QuantReport(
         title=title,
@@ -863,4 +863,3 @@ def auto_report(
                 r.add_text(f"<i>Rolling betas for {sym} unavailable: {e}</i>")
 
     return r
-

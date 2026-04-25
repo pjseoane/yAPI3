@@ -1477,15 +1477,6 @@ class QuantAnalytics:
         prices = self._prices(symbol, period=period)
         rets   = prices.pct_change().dropna()
 
-        best  = (rets.nlargest(n)
-                     .reset_index()
-                     .rename(columns={"date": "date", symbol: "return",
-                                      rets.name: "return", 0: "return"}))
-        worst = (rets.nsmallest(n)
-                     .reset_index()
-                     .rename(columns={"date": "date", symbol: "return",
-                                      rets.name: "return", 0: "return"}))
-
         # handle Series with name
         def _to_df(s, kind):
             df = s.reset_index()
