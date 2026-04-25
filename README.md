@@ -2,6 +2,12 @@
 
 Reusable quantitative finance library built around `yfinance`.
 
+## Project Layout
+
+- `yfinance_api3/`: importable library code
+- `notebooks/`: exploratory notebooks and generated analysis artifacts
+- notebooks are kept outside the package so they do not become part of the distributed API surface
+
 ## Install
 
 For local development:

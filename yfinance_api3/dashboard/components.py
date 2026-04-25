@@ -57,6 +57,10 @@ def header() -> dbc.Navbar:
 # Sidebar — symbol input + controls
 # ---------------------------------------------------------------------------
 
+_lbl = {"color": "#D3D1C7", "fontSize": "11px", "marginTop": "10px", "display": "block"}
+_dd  = {"fontSize": "12px"}
+
+
 def sidebar() -> html.Div:
     return html.Div([
         html.Div("Configuration", style={
@@ -130,10 +134,61 @@ def sidebar() -> html.Div:
         ),
 
         html.Div(style={"height": "24px"}),
-        html.Hr(style={"borderColor": "#444441"}),
+        html.Hr(style={"borderColor": "#444441", "marginTop": "20px"}),
 
-        # Extra controls (tab-specific, shown/hidden via callbacks)
-        html.Div(id="sidebar-extra"),
+        # ── Seasonality controls (always rendered, hidden when not on tab) ──
+        html.Div("Tab options", style={
+            "color": COLORS["muted"], "fontSize": "10px",
+            "fontWeight": "600", "letterSpacing": "1.5px",
+            "textTransform": "uppercase", "marginBottom": "12px",
+        }),
+
+        html.Div([
+            html.Label("Season — Symbol", style=_lbl),
+            dcc.Dropdown(id="dd-season-symbol",
+                options=[], value=None, clearable=False, style=_dd),
+            html.Label("Granularity", style=_lbl),
+            dcc.Dropdown(id="dd-season-gran",
+                options=[{"label":"Monthly","value":"monthly"},
+                         {"label":"Weekly","value":"weekly"}],
+                value="monthly", clearable=False, style=_dd),
+            html.Label("Long-term", style=_lbl),
+            dcc.Dropdown(id="dd-season-lt",
+                options=[{"label":f"{n}y","value":f"{n}y"} for n in [5,10,15,20]],
+                value="10y", clearable=False, style=_dd),
+            html.Label("Short-term", style=_lbl),
+            dcc.Dropdown(id="dd-season-st",
+                options=[{"label":f"{n}y","value":f"{n}y"} for n in [1,2,3,5]],
+                value="5y", clearable=False, style=_dd),
+        ], id="ctrl-seasonality", style={"display":"none"}),
+
+        html.Div([
+            html.Label("Backtest strategy", style=_lbl),
+            dcc.Dropdown(id="dd-bt-strategy",
+                options=[
+                    {"label":"Buy & Hold",    "value":"buy_hold"},
+                    {"label":"MA 20/50",       "value":"ma_20_50"},
+                    {"label":"MA 50/200",      "value":"ma_50_200"},
+                    {"label":"Momentum (63d)", "value":"momentum"},
+                    {"label":"Mean Reversion", "value":"mean_rev"},
+                ],
+                value="buy_hold", clearable=False, style=_dd),
+        ], id="ctrl-portfolio", style={"display":"none"}),
+
+        html.Div([
+            html.Label("Factor model", style=_lbl),
+            dcc.Dropdown(id="dd-factor-model",
+                options=[
+                    {"label":"FF3 (3-factor)",   "value":"ff3"},
+                    {"label":"FF5 (5-factor)",   "value":"ff5"},
+                    {"label":"FF3 + Momentum",   "value":"mom"},
+                    {"label":"FF6 (all factors)","value":"ff6"},
+                ],
+                value="ff5", clearable=False, style=_dd),
+        ], id="ctrl-factors", style={"display":"none"}),
+
+        # placeholder for sidebar-extra output
+        html.Div(id="sidebar-extra", style={"display":"none"}),
 
         # Status
         html.Div(id="status-msg", style={

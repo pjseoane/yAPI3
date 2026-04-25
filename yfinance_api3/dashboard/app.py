@@ -32,7 +32,8 @@ from yfinance_api3.classes.quant_analytics import QuantAnalytics
 from yfinance_api3.dashboard.components import (
     header, sidebar, plot_card, section_title, loading, COLORS
 )
-
+import logging
+logging.basicConfig(level=logging.DEBUG)
 
 # ---------------------------------------------------------------------------
 # Tab layouts

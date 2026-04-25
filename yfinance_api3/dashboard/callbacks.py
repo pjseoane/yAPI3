@@ -77,7 +77,7 @@ def register(app, client: StockClient, quant: QuantAnalytics) -> None:
     )
     def update_overview(n_clicks, symbols_raw, benchmark, period, rfr):
         from dash import html
-        from dashboard.components import metric_card, COLORS
+        from yfinance_api3.dashboard.components import metric_card, COLORS
 
         symbols = _parse_symbols(symbols_raw)
         if not symbols:
@@ -85,29 +85,38 @@ def register(app, client: StockClient, quant: QuantAnalytics) -> None:
             return empty, empty, empty, [], "No symbols entered"
 
         try:
+            import traceback as _tb
+            import dash_bootstrap_components as _dbc
+            from yfinance_api3.dashboard.components import metric_card, COLORS
+
             fig_cr  = plots.cumulative_returns(quant, symbols, period=period)
             fig_dd  = plots.drawdown(quant, symbols, period=period)
             fig_bar = plots.metrics_bar(quant, symbols, metric="sharpe",
                                         period=period, benchmark=benchmark,
                                         risk_free_rate=rfr)
 
-            # metric cards — use first symbol as representative
-            sym = symbols[0]
+            sym   = symbols[0]
             stats = quant.stock_report(sym, benchmark=benchmark,
                                        period=period, risk_free_rate=rfr)
+
+            def _col(label, value, color=COLORS["text"]):
+                return _dbc.Col(metric_card(label, value, color), md=2)
+
             cards = [
-                metric_card("CAGR (approx)", _fmt(stats["annualised_volatility"], pct=True)),
-                metric_card("Sharpe",        _fmt(stats["sharpe_ratio"])),
-                metric_card("Max Drawdown",  _fmt(stats["max_drawdown"], pct=True),
-                            color=COLORS["red"]),
-                metric_card("Beta",          _fmt(stats["beta"])),
-                metric_card("VaR 95%",       _fmt(stats["var_95_1d"], pct=True),
-                            color=COLORS["red"]),
-                metric_card("Volatility",    _fmt(stats["annualised_volatility"], pct=True)),
+                _col("Volatility",   _fmt(stats["annualised_volatility"], pct=True)),
+                _col("Sharpe",       _fmt(stats["sharpe_ratio"])),
+                _col("Sortino",      _fmt(stats["sortino_ratio"])),
+                _col("Max Drawdown", _fmt(stats["max_drawdown"], pct=True),
+                     color=COLORS["red"]),
+                _col("Beta",         _fmt(stats["beta"])),
+                _col("VaR 95% 1d",   _fmt(stats["var_95_1d"], pct=True),
+                     color=COLORS["red"]),
             ]
             return fig_cr, fig_dd, fig_bar, cards, f"✓ {len(symbols)} symbols loaded"
 
         except Exception as e:
+            import traceback as _tb
+            print(_tb.format_exc())
             empty = _empty_fig(str(e))
             return empty, empty, empty, [], f"Error: {e}"
 
@@ -286,13 +295,39 @@ def register(app, client: StockClient, quant: QuantAnalytics) -> None:
     # ── Sidebar extra controls (tab-specific) ─────────────────────────────
 
     @app.callback(
-        Output("sidebar-extra", "children"),
+        Output("ctrl-seasonality", "style"),
+        Output("ctrl-portfolio",   "style"),
+        Output("ctrl-factors",     "style"),
         Input("main-tabs", "active_tab"),
-        State("input-symbols", "value"),
     )
-    def update_sidebar_extra(active_tab, symbols_raw):
-        from dash import html
+    def show_tab_controls(active_tab):
+        """Show the relevant sidebar control panel for the active tab."""
+        show = {"display": "block"}
+        hide = {"display": "none"}
+        return (
+            show if active_tab == "tab-seasonality" else hide,
+            show if active_tab == "tab-portfolio"   else hide,
+            show if active_tab == "tab-factors"     else hide,
+        )
 
+    @app.callback(
+        Output("dd-season-symbol", "options"),
+        Output("dd-season-symbol", "value"),
+        Input("btn-run", "n_clicks"),
+        State("input-symbols", "value"),
+        prevent_initial_call=True,
+    )
+    def update_season_symbols(n_clicks, symbols_raw):
+        """Populate the seasonality symbol dropdown after Run is clicked."""
+        symbols = _parse_symbols(symbols_raw or "AAPL")
+        opts = [{"label": s, "value": s} for s in symbols]
+        return opts, (symbols[0] if symbols else None)
+
+    def _removed_sidebar_extra(active_tab, symbols_raw):
+        # removed — replaced by static controls in components.py
+        pass
+
+    def _placeholder():
         # ALL dropdown IDs must always be present in the DOM —
         # Dash requires every Input/State ID to exist before any
         # callback that uses them can fire. Hidden ones serve as placeholders.
