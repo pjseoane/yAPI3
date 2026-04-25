@@ -1,9 +1,14 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-requires-python = ">=3.13,<3.14"
-name = "yfinanceAPI"
-version = "0.0.1"
+name = "yfinance_api3"
+version = "0.1.0"
 description = "Reusable quantitative finance engine"
-authors = [{name="Paulino, Anthropic"}]
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Paulino" }]
 dependencies = [
     "yfinance>=0.2",
     "scipy",
@@ -11,4 +16,9 @@ dependencies = [
     "plotly",
     "yahooquery",
     "openpyxl",
-    ]
+]
+
+[tool.setuptools.packages.find]
+include = ["yfinance_api3*"]
+exclude = ["yfinance_api3.notebooks*"]
+
