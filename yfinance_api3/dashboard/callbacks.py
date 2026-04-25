@@ -168,16 +168,17 @@ def register(app, client: StockClient, quant: QuantAnalytics) -> None:
                            season_sym, gran, lt, st):
         symbols = _parse_symbols(symbols_raw)
         sym     = season_sym or (symbols[0] if symbols else "SPY")
+        season_period = lt or period or "10y"
 
         try:
             return (
-                plots.seasonality(quant, sym, period=period,
+                plots.seasonality(quant, sym, period=season_period,
                                   granularity=gran or "monthly"),
-                plots.seasonality_heatmap(quant, sym, period=period),
+                plots.seasonality_heatmap(quant, sym, period=season_period),
                 plots.seasonality_comparison_clean(quant, sym,
-                                                   long_term=lt or "10y",
+                                                   long_term=season_period,
                                                    short_term=st or "5y"),
-                plots.seasonality_box(quant, sym, period=period,
+                plots.seasonality_box(quant, sym, period=season_period,
                                       granularity=gran or "monthly"),
             )
         except Exception as ex:

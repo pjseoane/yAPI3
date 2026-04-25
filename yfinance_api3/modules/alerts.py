@@ -204,7 +204,7 @@ class AlertEngine:
                 "symbol":       a.symbol,
                 "cooldown_min": a.cooldown_min,
                 "tags":         a.tags,
-                "last_trigger": a.last_trigger.isoformat()
+                "last_trigger": a._last_trigger.isoformat()
                                 if a._last_trigger else None,
             }
             for a in self._alerts

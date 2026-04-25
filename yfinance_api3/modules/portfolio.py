@@ -232,7 +232,7 @@ def max_sharpe(
 
     def neg_sharpe(w):
         ret, vol, _ = _portfolio_stats(w, mean_returns, cov, risk_free_rate)
-        return -ret / vol if vol > 1e-10 else 1e10
+        return -(ret - risk_free_rate) / vol if vol > 1e-10 else 1e10
 
     result = minimize(
         fun=neg_sharpe,

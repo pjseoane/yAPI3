@@ -35,7 +35,10 @@ class TTLCache:
     def _make_key(self, namespace: str, *args, **kwargs) -> str:
         payload = json.dumps({"a": args, "k": kwargs}, sort_keys=True, default=str)
         digest = hashlib.md5(payload.encode()).hexdigest()
-        return f"{namespace}:{digest}"
+        symbol_hint = ""
+        if args and isinstance(args[0], str):
+            symbol_hint = args[0].upper()
+        return f"{namespace}:{symbol_hint}:{digest}"
 
     def get(self, key: str) -> tuple[bool, Any]:
         entry = self._store.get(key)
@@ -53,7 +56,7 @@ class TTLCache:
             count = len(self._store)
             self._store.clear()
             return count
-        keys = [k for k in self._store if k.startswith(prefix)]
+        keys = [k for k in self._store if prefix in k]
         for k in keys:
             del self._store[k]
         return len(keys)
@@ -163,6 +166,7 @@ class StockClient:
         return {
             "symbol": data["symbol"],
             "price": price,
+            "previous_close": prev,
             "change": round(change, 4),
             "change_pct": round(pct, 4),
         }
@@ -391,5 +395,5 @@ class StockClient:
         Pass a symbol to clear only that ticker's entries,
         or nothing to wipe the entire cache.
         """
-        prefix = symbol.upper() if symbol else None
+        prefix = f":{symbol.upper()}:" if symbol else None
         return self._cache.invalidate(prefix)

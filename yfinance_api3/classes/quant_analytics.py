@@ -552,7 +552,7 @@ class QuantAnalytics:
                 "sharpe_ratio":          self.sharpe_ratio(sym, period, risk_free_rate),
                 "sortino_ratio":         self.sortino_ratio(sym, period, risk_free_rate),
                 "beta":                  self.beta(sym, benchmark, period),
-                "calmar_ratio":          self.calmar_ratio(sym, "3y"),
+                "calmar_ratio":          self.calmar_ratio(sym, period),
                 "var_95_1d":             self.var(sym, period, confidence=0.95),
                 "cvar_95_1d":            self.cvar(sym, period, confidence=0.95),
             }
@@ -578,7 +578,7 @@ class QuantAnalytics:
             "sharpe_ratio": self.sharpe_ratio(symbol, period, risk_free_rate),
             "sortino_ratio": self.sortino_ratio(symbol, period, risk_free_rate),
             "beta": self.beta(symbol, benchmark, period),
-            "calmar_ratio": self.calmar_ratio(symbol, "3y"),
+            "calmar_ratio": self.calmar_ratio(symbol, period),
             "var_95_1d": self.var(symbol, period, confidence=0.95),
             "cvar_95_1d": self.cvar(symbol, period, confidence=0.95),
         }
