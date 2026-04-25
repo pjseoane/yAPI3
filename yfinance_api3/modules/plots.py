@@ -34,6 +34,41 @@ from yfinance_api3.modules.factors import _FACTOR_LABELS
 
 
 # ---------------------------------------------------------------------------
+# Architecture notes — lessons learned
+# ---------------------------------------------------------------------------
+#
+# 1. DATE vs CATEGORICAL AXIS CONFLICT IN MULTI-SUBPLOT FIGURES
+#    Symptom : chart renders title + legend but panels are completely empty
+#              (no bars, no lines, no dots, no axis labels)
+#    Cause   : make_subplots() + barmode="group" forces Plotly to reconcile
+#              ALL subplot x-axes together. When one panel is categorical
+#              (string labels) and another is date (ISO strings), Plotly
+#              fails silently and renders nothing.
+#    WRONG   : make_subplots(rows=2) + fig.update_xaxes(type="category", row=1)
+#              + fig.update_xaxes(type="date", row=2) + update_layout(barmode="group")
+#    RIGHT   : Use domain-based manual layout — define xaxis/xaxis2 directly
+#              in update_layout() with explicit domain, type, and anchor.
+#              Each trace declares xaxis="x" or xaxis="x2" explicitly.
+#              No make_subplots(), no barmode conflict.
+#    Example : see best_worst_days() — Panel 1 categorical, Panel 2 date.
+#
+# 2. _apply_layout() RESETS AXIS TYPES IN SUBPLOTS
+#    Symptom : axis type set before _apply_layout() is lost afterwards.
+#    Cause   : _apply_layout spreads **_LAYOUT which contains xaxis=dict(...)
+#              This overwrites the entire xaxis object, clearing type="date"
+#              or type="category" that was previously set.
+#    Fix     : re-apply axis types AFTER _apply_layout(), or use domain-based
+#              layout (note 1) which sets axis types inside update_layout()
+#              directly and avoids the issue entirely.
+#
+# 3. SEASONALITY PLOTS — USE _apply_layout NOT _apply_date_layout
+#    Symptom : empty chart when using _apply_date_layout on seasonality plots.
+#    Cause   : _apply_date_layout calls update_xaxes(type="date") globally.
+#              Seasonality x-axes are categorical ("Jan","Feb" or "W01","W02"),
+#              so forcing type="date" silently drops all traces.
+#    Fix     : seasonality plots always use _apply_layout (no date forcing).
+#
+# ---------------------------------------------------------------------------
 # Shared style
 # ---------------------------------------------------------------------------
 
@@ -238,11 +273,11 @@ def scatter(
         ),
     ))
 
-    fig.update_xaxes(range=[lo, hi], title_text=f"{label} — {label_x}")
-    fig.update_yaxes(range=[lo, hi], title_text=f"{label} — {label_y}")
     _apply_layout(fig,
                   title=f"{label}: {label_x} vs {label_y}",
                   subtitle=f"benchmark: {benchmark}  ·  risk-free rate {risk_free_rate:.0%}")
+    fig.update_xaxes(range=[lo, hi], title_text=f"{label} — {label_x}")
+    fig.update_yaxes(range=[lo, hi], title_text=f"{label} — {label_y}")
     return fig
 
 
@@ -478,10 +513,10 @@ def returns_distribution(
         ))
 
     fig.add_vline(x=0, line=dict(color="#B4B2A9", width=1, dash="dash"))
-    fig.update_xaxes(title_text="Daily return", tickformat=".1%")
-    fig.update_yaxes(title_text="Density")
     fig.update_layout(barmode="overlay")
     _apply_layout(fig, title=f"Return distribution — {_period_label(period)}")
+    fig.update_xaxes(title_text="Daily return", tickformat=".1%")
+    fig.update_yaxes(title_text="Density")
     return fig
 
 
@@ -541,10 +576,10 @@ def metrics_bar(
             pass
 
     fig.add_vline(x=0, line=dict(color="#B4B2A9", width=0.8))
-    fig.update_xaxes(title_text=label)
-    fig.update_yaxes(title_text="")
     fig.update_layout(height=max(350, len(syms) * 45 + 120))
     _apply_layout(fig, title=f"{label} — {_period_label(period)}")
+    fig.update_xaxes(title_text=label)
+    fig.update_yaxes(title_text="")
     return fig
 
 
@@ -1079,14 +1114,14 @@ def efficient_frontier(frontier, show_assets: bool = True) -> go.Figure:
         ),
     ))
 
-    fig.update_xaxes(title_text="Annualised volatility", tickformat=".1%")
-    fig.update_yaxes(title_text="Annualised return",     tickformat=".1%")
     _apply_layout(
         fig,
         title="Efficient Frontier",
         subtitle=f"period: {_period_label(frontier.period)}  ·  "
                  f"rf: {rf:.1%}  ·  {len(frontier.symbols)} assets",
     )
+    fig.update_xaxes(title_text="Annualised volatility", tickformat=".1%")
+    fig.update_yaxes(title_text="Annualised return",     tickformat=".1%")
     return fig
 
 
@@ -1396,7 +1431,7 @@ def monte_carlo(result, show_paths: int = 50) -> go.Figure:
                      row=2, col=1, gridcolor="#D3D1C7",
                      tickfont=dict(size=9, color="#888780"))
 
-    _apply_date_layout(
+    _apply_layout(
         fig,
         title=f"Monte Carlo Simulation — {result.method}",
         subtitle=(
@@ -1406,6 +1441,10 @@ def monte_carlo(result, show_paths: int = 50) -> go.Figure:
         ),
     )
     fig.update_layout(height=750, hovermode="x")
+    # x-axis Panel 1 is trading day integers — must be linear not date
+    fig.update_xaxes(type="linear", row=1, col=1)
+    # x-axis Panel 2 is dollar values — also linear
+    fig.update_xaxes(type="linear", row=2, col=1)
     return fig
 
 
@@ -2214,14 +2253,14 @@ def factor_exposure(result, show_significance: bool = True) -> go.Figure:
                      tickfont=dict(size=10, color="#888780"))
     fig.update_xaxes(tickfont=dict(size=10, color="#5F5E5A"),
                      row=1, col=1)
-    fig.update_xaxes(visible=False, row=1, col=2)
-    fig.update_yaxes(visible=False, row=1, col=2)
 
     _apply_layout(
         fig,
         title=f"{result.symbol} — Factor exposure [{result.model.upper()}]",
         subtitle=f"period: {_period_label(result.period)}",
     )
+    fig.update_xaxes(visible=False, row=1, col=2)
+    fig.update_yaxes(visible=False, row=1, col=2)
     fig.update_layout(height=420, margin=dict(b=60))
     return fig
 
@@ -3024,8 +3063,6 @@ def sp500_concentration(sp, top_n: int = 50) -> go.Figure:
         bgcolor="rgba(255,255,255,0.0)",
         borderwidth=0,
     )
-    fig.update_xaxes(visible=False, row=2, col=2)
-    fig.update_yaxes(visible=False, row=2, col=2)
 
     _apply_layout(
         fig,
@@ -3037,6 +3074,8 @@ def sp500_concentration(sp, top_n: int = 50) -> go.Figure:
             f"HHI = {m['hhi']:.0f}"
         ),
     )
+    fig.update_xaxes(visible=False, row=2, col=2)
+    fig.update_yaxes(visible=False, row=2, col=2)
     fig.update_layout(height=800)
     return fig
 
@@ -3053,19 +3092,12 @@ def best_worst_days(
     initial_value: float = 10_000.0,
 ) -> go.Figure:
     """
-    "Cost of missing the best days" visualisation — two panels.
+    "Cost of missing the best days" — two panels.
 
-    Panel 1 (bar): final portfolio value for each scenario
-                   Buy & Hold vs miss-best vs miss-worst
-    Panel 2 (scatter): best and worst individual trading days on a timeline
-                       — shows they cluster around market crises
-
-    The key message: missing just the 10 best days typically cuts
-    returns in half. Those days cluster near the worst days, so
-    trying to time the market is a double-edged sword.
+    Panel 1 (bar)    : final portfolio value for each scenario
+    Panel 2 (scatter): timeline showing best/worst days cluster together
     """
-    df     = quant.best_worst_days_impact(symbol, period, miss_scenarios,
-                                           initial_value)
+    df     = quant.best_worst_days_impact(symbol, period, miss_scenarios, initial_value)
     detail = quant.best_worst_days_detail(symbol, period, n=20)
 
     bh_row    = df[df["type"] == "buy_and_hold"].iloc[0]
@@ -3076,159 +3108,96 @@ def best_worst_days(
     fig = make_subplots(
         rows=2, cols=1,
         row_heights=[0.58, 0.42],
-        vertical_spacing=0.10,
+        vertical_spacing=0.12,
         subplot_titles=[
             f"Final value of ${initial_value:,.0f} invested — {_period_label(period)}",
             "When did the best and worst days occur?",
         ],
     )
 
-    # ── Panel 1: bar chart ────────────────────────────────────────────────
-    # buy & hold reference line
-    fig.add_hline(y=bh_final, row=1, col=1,
-                  line=dict(color="#2C2C2A", width=1.5, dash="dash"),
-                  annotation=dict(
-                      text=f"Buy & Hold ${bh_final:,.0f}",
-                      font=dict(size=9, color="#2C2C2A"),
-                      xanchor="left",
-                  ))
+    # ── Panel 1: single bar trace with all scenarios ──────────────────────
+    all_x = (
+        ["Buy & Hold"] +
+        [f"Miss best {n}d"  for n in miss_best["days_missed"]] +
+        [f"Miss worst {n}d" for n in miss_wrst["days_missed"]]
+    )
+    all_y = (
+        [bh_final] +
+        list(miss_best["final_value"]) +
+        list(miss_wrst["final_value"])
+    )
+    all_colors = (
+        ["#2C2C2A"] +
+        ["#E24B4A"] * len(miss_best) +
+        ["#1D9E75"] * len(miss_wrst)
+    )
 
-    # miss best bars
     fig.add_trace(go.Bar(
-        x=[f"Miss best<br>{n}d" for n in miss_best["days_missed"]],
-        y=miss_best["final_value"],
-        name="Miss best N days",
-        marker_color="#E24B4A",
-        text=[f"${v:,.0f}" for v in miss_best["final_value"]],
+        x=all_x, y=all_y,
+        marker_color=all_colors,
+        text=[f"${v:,.0f}" for v in all_y],
         textposition="outside",
-        textfont=dict(size=9),
-        customdata=miss_best[["days_missed", "total_return", "cagr",
-                               "vs_buy_hold"]].values,
-        hovertemplate=(
-            "<b>Miss best %{customdata[0]} days</b><br>"
-            "Final value: $%{y:,.0f}<br>"
-            "Total return: %{customdata[1]:.1%}<br>"
-            "CAGR: %{customdata[2]:.2%}<br>"
-            "vs Buy & Hold: $%{customdata[3]:,.0f}"
-            "<extra></extra>"
-        ),
+        textfont=dict(size=8),
+        showlegend=False,
+        hovertemplate="<b>%{x}</b><br>Final: $%{y:,.0f}<extra></extra>",
     ), row=1, col=1)
 
-    # miss worst bars
-    fig.add_trace(go.Bar(
-        x=[f"Miss worst<br>{n}d" for n in miss_wrst["days_missed"]],
-        y=miss_wrst["final_value"],
-        name="Miss worst N days",
-        marker_color="#1D9E75",
-        text=[f"${v:,.0f}" for v in miss_wrst["final_value"]],
-        textposition="outside",
-        textfont=dict(size=9),
-        customdata=miss_wrst[["days_missed", "total_return", "cagr",
-                               "vs_buy_hold"]].values,
-        hovertemplate=(
-            "<b>Miss worst %{customdata[0]} days</b><br>"
-            "Final value: $%{y:,.0f}<br>"
-            "Total return: %{customdata[1]:.1%}<br>"
-            "CAGR: %{customdata[2]:.2%}<br>"
-            "vs Buy & Hold: +$%{customdata[3]:,.0f}"
-            "<extra></extra>"
-        ),
-    ), row=1, col=1)
-
-    # buy & hold dot
-    fig.add_trace(go.Scatter(
-        x=["Buy &<br>Hold"],
-        y=[bh_final],
-        mode="markers+text",
-        marker=dict(size=14, symbol="diamond", color="#2C2C2A",
-                    line=dict(color="white", width=1.5)),
-        text=[f"${bh_final:,.0f}"],
-        textposition="top center",
-        textfont=dict(size=9),
-        name=f"Buy & Hold ({bh_row['cagr']:.1%}/yr)",
-        hovertemplate=(
-            f"<b>Buy & Hold</b><br>"
-            f"Final: ${bh_final:,.0f}<br>"
-            f"CAGR: {bh_row['cagr']:.2%}"
-            "<extra></extra>"
-        ),
-    ), row=1, col=1)
+    fig.add_hline(
+        y=bh_final, row=1, col=1,
+        line=dict(color="#2C2C2A", width=1.2, dash="dash"),
+        annotation=dict(text=f"Buy & Hold ${bh_final:,.0f}",
+                        font=dict(size=9, color="#2C2C2A"), xanchor="left"),
+    )
 
     fig.update_yaxes(
-        title_text="Final value ($)",
-        tickformat="$,.0f",
-        gridcolor="#D3D1C7",
-        tickfont=dict(size=9, color="#888780"),
-        row=1, col=1,
-    )
-    fig.update_xaxes(
-        tickfont=dict(size=9, color="#5F5E5A"),
+        title_text="Final value ($)", tickformat="$,.0f",
+        gridcolor="#D3D1C7", tickfont=dict(size=9, color="#888780"),
         row=1, col=1,
     )
 
-    # ── Panel 2: timeline of best and worst days ──────────────────────────
-    best_days  = detail[detail["type"] == "best"]
-    worst_days = detail[detail["type"] == "worst"]
+    # ── Panel 2: scatter timeline with date strings ───────────────────────
+    best_days  = detail[detail["type"] == "best"].copy()
+    worst_days = detail[detail["type"] == "worst"].copy()
+    best_days["ds"]  = pd.to_datetime(best_days["date"]).dt.strftime("%Y-%m-%d")
+    worst_days["ds"] = pd.to_datetime(worst_days["date"]).dt.strftime("%Y-%m-%d")
 
     fig.add_trace(go.Scatter(
-        x=best_days["date"],
-        y=best_days["return"],
-        mode="markers",
-        marker=dict(size=10, color="#1D9E75",
-                    line=dict(color="white", width=1)),
-        name="Best days",
-        customdata=best_days[["date", "return"]].values,
-        hovertemplate=(
-            "<b>Best day</b><br>"
-            "%{x|%Y-%m-%d}<br>"
-            "Return: %{y:.2%}<extra></extra>"
-        ),
+        x=best_days["ds"], y=best_days["return"],
+        mode="markers", name="Best days",
+        marker=dict(size=10, color="#1D9E75", line=dict(color="white", width=1)),
+        hovertemplate="<b>Best day</b><br>%{x}<br>Return: %{y:.2%}<extra></extra>",
     ), row=2, col=1)
 
     fig.add_trace(go.Scatter(
-        x=worst_days["date"],
-        y=worst_days["return"],
-        mode="markers",
-        marker=dict(size=10, color="#E24B4A",
-                    line=dict(color="white", width=1)),
-        name="Worst days",
-        hovertemplate=(
-            "<b>Worst day</b><br>"
-            "%{x|%Y-%m-%d}<br>"
-            "Return: %{y:.2%}<extra></extra>"
-        ),
+        x=worst_days["ds"], y=worst_days["return"],
+        mode="markers", name="Worst days",
+        marker=dict(size=10, color="#E24B4A", line=dict(color="white", width=1)),
+        hovertemplate="<b>Worst day</b><br>%{x}<br>Return: %{y:.2%}<extra></extra>",
     ), row=2, col=1)
 
     fig.add_hline(y=0, row=2, col=1,
                   line=dict(color="#B4B2A9", width=0.8, dash="dash"))
 
-    fig.update_xaxes(
-        type="date", tickformat="%Y",
-        gridcolor="#D3D1C7",
-        tickfont=dict(size=9, color="#888780"),
-        row=2, col=1,
-    )
     fig.update_yaxes(
-        title_text="Daily return",
-        tickformat=".0%",
-        gridcolor="#D3D1C7",
-        tickfont=dict(size=9, color="#888780"),
+        title_text="Daily return", tickformat=".0%",
+        gridcolor="#D3D1C7", tickfont=dict(size=9, color="#888780"),
         row=2, col=1,
     )
 
-    # annotation box
-    n_days   = int(df["n_trading_days"].iloc[0])
-    ann = (
-        f"<b>{symbol} — {_period_label(period)}</b><br>"
-        f"{n_days:,} trading days<br>"
-        f"Buy & Hold: ${bh_final:,.0f}  ({bh_row['cagr']:.1%}/yr)<br>"
-        f"Miss best 10d: ${miss_best[miss_best['days_missed']==10]['final_value'].values[0]:,.0f}  "
-        f"({miss_best[miss_best['days_missed']==10]['cagr'].values[0]:.1%}/yr)"
-        if 10 in miss_best["days_missed"].values else ""
+    # annotation
+    n_days = int(df["n_trading_days"].iloc[0])
+    ann_text = (
+        f"<b>{symbol}  ·  {_period_label(period)}</b><br>"
+        f"{n_days:,} trading days  ·  B&H: ${bh_final:,.0f} ({bh_row['cagr']:.1%}/yr)"
     )
+    if 10 in miss_best["days_missed"].values:
+        v10 = miss_best[miss_best["days_missed"]==10]["final_value"].values[0]
+        c10 = miss_best[miss_best["days_missed"]==10]["cagr"].values[0]
+        ann_text += f"<br>Miss best 10d: ${v10:,.0f} ({c10:.1%}/yr)"
+
     fig.add_annotation(
         xref="paper", yref="paper", x=0.01, y=0.99,
-        text=ann, showarrow=False, align="left",
+        text=ann_text, showarrow=False, align="left",
         font=dict(size=10, color="#5F5E5A"),
         bgcolor="rgba(255,255,255,0.88)",
         bordercolor="#D3D1C7", borderwidth=0.5, borderpad=8,
@@ -3239,11 +3208,21 @@ def best_worst_days(
         title=f"{symbol} — Cost of missing the best days",
         subtitle=(
             f"${initial_value:,.0f} invested  ·  {_period_label(period)}  ·  "
-            "red = miss best days (costly)  ·  green = miss worst days (lucky)"
+            "red = miss best (costly)  ·  green = miss worst (lucky)"
         ),
     )
-    fig.update_layout(height=700, barmode="group")
+    fig.update_layout(
+        height=700,
+        legend=dict(orientation="h", yanchor="bottom", y=1.01,
+                    xanchor="right", x=1, font=dict(size=11)),
+        # explicit width helps notebook renderers size the figure correctly
+        autosize=True,
+    )
+    # set axis types after _apply_layout to prevent reset
+    fig.update_xaxes(type="category", row=1, col=1)
+    fig.update_xaxes(type="date", tickformat="%Y", row=2, col=1)
     return fig
+
 
 
 # ---------------------------------------------------------------------------
