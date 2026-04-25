@@ -10,4 +10,5 @@ dependencies = [
     "matplotlib",
     "plotly",
     "yahooquery",
+    "openpyxl",
     ]
