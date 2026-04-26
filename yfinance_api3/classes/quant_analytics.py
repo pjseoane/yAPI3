@@ -44,8 +44,23 @@ class QuantAnalytics:
         This is the correct input for return, volatility, beta, and Sharpe
         calculations — raw closes would distort every metric around ex-div dates
         and stock splits.
+
+        Period handling
+        ---------------
+        yfinance natively supports up to "10y". Any "Ny" period where N > 10
+        (e.g. "20y", "15y") is transparently handled by fetching "max" data
+        and slicing to the last N years — so every method that calls _prices()
+        automatically supports extended periods without any extra logic.
         """
-        bars = self.client.get_history(symbol, period=period, interval=interval, adjusted=True)
+        # translate "Ny" periods > 10y to "max" + date slice
+        if period.endswith("y") and period[:-1].isdigit():
+            n_years = int(period[:-1])
+            fetch_period = "max" if n_years > 10 else period
+        else:
+            n_years = None
+            fetch_period = period
+
+        bars = self.client.get_history(symbol, period=fetch_period, interval=interval, adjusted=True)
         if not bars:
             raise ValueError(f"No history returned for '{symbol}' (period={period})")
         df = pd.DataFrame(bars)
@@ -54,7 +69,14 @@ class QuantAnalytics:
         # clean tz-naive date-only timestamps — yfinance returns tz-aware index
         df["date"] = dates.dt.tz_convert(None) if dates.dt.tz is not None else dates
         df["date"] = df["date"].dt.normalize()   # drop time component (00:00:00)
-        return df.set_index("date")["adj_close"].sort_index().astype(float)
+        prices = df.set_index("date")["adj_close"].sort_index().astype(float)
+
+        # slice to requested period if > 10y
+        if n_years is not None:
+            cutoff = prices.index[-1] - pd.DateOffset(years=n_years)
+            prices = prices[prices.index >= cutoff]
+
+        return prices
 
     def _prices_bulk(
         self, symbols: list[str], period: str, interval: str = "1d"
@@ -62,6 +84,35 @@ class QuantAnalytics:
         """Return a DataFrame of closing prices, one column per symbol."""
         series = {sym: self._prices(sym, period, interval) for sym in symbols}
         return pd.DataFrame(series).sort_index()
+
+    # ------------------------------------------------------------------
+    # ARCHITECTURE RULE — always use _prices() for historical data
+    # ------------------------------------------------------------------
+    #
+    # _prices() is the ONLY correct way to fetch historical price data
+    # inside QuantAnalytics. It handles:
+    #
+    #   1. Period translation  — any "Ny" period (e.g. "20y", "15y") is
+    #                            transparently converted to "max" + date slice,
+    #                            since yfinance only supports up to "10y" natively.
+    #
+    #   2. Timezone stripping  — yfinance returns tz-aware DatetimeIndex.
+    #                            _prices() converts to tz-naive, date-only index
+    #                            so downstream code (plots, groupby, joins) works
+    #                            correctly across all pandas versions.
+    #
+    #   3. Single cache gate   — all fetches flow through StockClient.get_history()
+    #                            which applies TTL caching and period-aware slicing.
+    #
+    # NEVER call self.client.get_history() directly from a public method.
+    # NEVER call yfinance directly from inside QuantAnalytics.
+    #
+    # Every new method that needs price history should follow this pattern:
+    #
+    #     prices = self._prices(symbol, period)          # single symbol
+    #     prices = self._prices_bulk(symbols, period)    # multiple symbols
+    #
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _log_returns(prices: pd.Series) -> pd.Series:
@@ -973,22 +1024,14 @@ class QuantAnalytics:
         Rows   : calendar year
         Columns: ISO week number (1–52)
         Values : weekly return (NaN where data is unavailable)
+
+        Delegates to weekly_seasonality() which handles any "Ny" period
+        (including "20y") via "max" fetch + year filtering.
+        Simply transposes the (week × year) pivot to (year × week).
         """
-        prices = self._prices(symbol, period=period, interval="1d")
-        weekly = prices.resample("W-FRI").last().dropna()
-        weekly_returns = weekly.pct_change().dropna()
-
-        df = weekly_returns.to_frame(name="return")
-        df["week"] = weekly_returns.index.strftime("%V").astype(int)
-        df["year"] = weekly_returns.index.year
-
-        # pivot: rows=year, cols=week
-        pivot = df.pivot_table(
-            index="year", columns="week", values="return", aggfunc="first"
-        )
-        # keep only weeks 1–52
-        pivot = pivot[[c for c in range(1, 53) if c in pivot.columns]]
-        return pivot
+        # weekly_seasonality returns (week × year) — transpose to (year × week)
+        pivot_wk_yr = self.weekly_seasonality(symbol, period=period)
+        return pivot_wk_yr.T
 
     # ------------------------------------------------------------------
     # Rolling return analysis
@@ -1029,12 +1072,13 @@ class QuantAnalytics:
         print(f"Avg 5y return: {rets.mean():.1%}")
         print(f"Win rate:      {(rets > 0).mean():.1%}")
         """
-        prices      = self._prices(symbol, period=period)
-        hold_days   = int(hold_years * self.trading_days)
+        # _prices() handles "Ny" periods > 10y transparently via "max" fetch
+        prices    = self._prices(symbol, period=period)
+        hold_days = int(hold_years * self.trading_days)
 
         # total return from each entry date to hold_days later
-        future_price   = prices.shift(-hold_days)
-        total_return   = (future_price - prices) / prices
+        future_price = prices.shift(-hold_days)
+        total_return = (future_price - prices) / prices
 
         # drop entries where we don't have hold_days of forward data
         return total_return.dropna().rename(f"{symbol}_{hold_years}y_return")
@@ -1126,9 +1170,10 @@ class QuantAnalytics:
             except Exception as e:
                 print(f"Skipping {sym}: {e}")
 
-        df = pd.DataFrame(rows)
-        # sort by mean_return descending
-        return df.T.sort_values("mean_return", ascending=False).T
+        # rows is {symbol: stats_dict} — build with symbols as rows directly
+        df = pd.DataFrame(rows).T        # symbols as rows, stats as columns
+        df.index.name = "symbol"
+        return df.sort_values("mean_return", ascending=False)
 
 
     # ------------------------------------------------------------------
