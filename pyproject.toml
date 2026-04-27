@@ -9,6 +9,13 @@ description = "Reusable quantitative finance engine"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Paulino" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     # data
     "yfinance>=0.2",
@@ -33,9 +40,6 @@ dashboard-dash = [
 dashboard-streamlit = [
     "streamlit>=1.30",
 ]
-alerts = [
-    "requests",         # already in core, listed for clarity
-]
 dev = [
     "pytest",
     "pytest-cov",
@@ -58,3 +62,7 @@ exclude = [
     "notebooks",
     "*.egg-info",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
