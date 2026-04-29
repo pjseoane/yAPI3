@@ -699,3 +699,188 @@ def ma_crossover_alert(
     return Alert(name=name, symbol=symbol, check_fn=check,
                  cooldown_min=cooldown_min, tags=["ma", "crossover"])
 
+
+
+# ---------------------------------------------------------------------------
+# Options alert factories
+# ---------------------------------------------------------------------------
+
+def gex_flip_alert(
+    symbol: str,
+    client,
+    risk_free_rate: float = 0.05,
+    cooldown_min: int = 120,
+) -> Alert:
+    """
+    Alert when spot price crosses the GEX flip level.
+
+    The GEX flip is the strike where net gamma exposure crosses zero.
+    Below the flip → short gamma regime (amplifying moves).
+    Above the flip → long gamma regime (stabilising moves).
+
+    Crossing the flip is a significant regime change signal.
+
+    Example
+    -------
+    engine.add(gex_flip_alert("SPY", client))
+    """
+    name = f"GEX flip crossing — {symbol}"
+
+    def check(quant, _client) -> AlertResult | None:
+        from yfinance_api3.classes.options import OptionsAnalyzer
+        opt   = OptionsAnalyzer(_client, symbol)
+        total = opt.gex_total(max_expiries=6, risk_free_rate=risk_free_rate)
+        flips = total.get("gex_flip_strikes", [])
+        if not flips:
+            return None
+
+        spot     = opt._get_spot()
+        nearest  = min(flips, key=lambda f: abs(f - spot))
+        distance = (spot - nearest) / nearest
+
+        # alert when within 0.5% of the flip level
+        if abs(distance) > 0.005:
+            return None
+
+        regime = total.get("regime", "unknown")
+        return AlertResult(
+            alert_name=name,
+            symbol=symbol,
+            message=(
+                f"{symbol} spot ${spot:,.2f} is within 0.5% of GEX flip "
+                f"${nearest:,.2f} — regime transition risk. "
+                f"Current: {regime.replace('_', ' ')}"
+            ),
+            value=spot,
+            threshold=nearest,
+            direction="above" if spot > nearest else "below",
+            severity="warning",
+            extra={"gex_flip": nearest, "regime": regime,
+                   "total_gex": total.get("total_gex", 0)},
+        )
+
+    return Alert(name=name, symbol=symbol, check_fn=check,
+                 cooldown_min=cooldown_min,
+                 tags=["options", "gex", "regime"])
+
+
+def unusual_activity_alert(
+    symbol: str,
+    client,
+    vol_oi_threshold: float = 5.0,
+    min_volume: int = 500,
+    cooldown_min: int = 60,
+) -> Alert:
+    """
+    Alert when unusual options activity is detected.
+
+    Triggers when any strike has volume/OI ratio above the threshold —
+    indicating new institutional positioning.
+
+    Example
+    -------
+    engine.add(unusual_activity_alert("AAPL", client, vol_oi_threshold=5.0))
+    """
+    name = f"Unusual options activity — {symbol}"
+
+    def check(quant, _client) -> AlertResult | None:
+        from yfinance_api3.classes.options import OptionsAnalyzer
+        opt     = OptionsAnalyzer(_client, symbol)
+        unusual = opt.unusual_activity(
+            vol_oi_threshold=vol_oi_threshold,
+            min_volume=min_volume,
+        )
+        if unusual.empty:
+            return None
+
+        top = unusual.iloc[0]
+        return AlertResult(
+            alert_name=name,
+            symbol=symbol,
+            message=(
+                f"{symbol} unusual activity: {top['type'].upper()} "
+                f"${top['strike']:,.0f} exp {top['expiry']} — "
+                f"vol/OI: {top['vol_oi_ratio']:.1f}x  "
+                f"({top['signal']})"
+            ),
+            value=float(top["vol_oi_ratio"]),
+            threshold=vol_oi_threshold,
+            direction="above",
+            severity="warning" if top["vol_oi_ratio"] < 10 else "critical",
+            extra={
+                "strike":    float(top["strike"]),
+                "expiry":    str(top["expiry"]),
+                "type":      str(top["type"]),
+                "volume":    int(top["volume"]),
+                "signal":    str(top["signal"]),
+                "n_unusual": len(unusual),
+            },
+        )
+
+    return Alert(name=name, symbol=symbol, check_fn=check,
+                 cooldown_min=cooldown_min,
+                 tags=["options", "unusual", "flow"])
+
+
+def pcr_spike_alert(
+    symbol: str,
+    client,
+    pcr_high: float = 1.5,
+    pcr_low: float = 0.5,
+    cooldown_min: int = 240,
+) -> Alert:
+    """
+    Alert when put/call ratio reaches extreme levels.
+
+    PCR > pcr_high → extreme fear / heavy put buying (potential reversal signal)
+    PCR < pcr_low  → extreme complacency / heavy call buying (potential top signal)
+
+    Example
+    -------
+    engine.add(pcr_spike_alert("SPY", client, pcr_high=1.5, pcr_low=0.5))
+    """
+    name = f"PCR extreme — {symbol}"
+
+    def check(quant, _client) -> AlertResult | None:
+        from yfinance_api3.classes.options import OptionsAnalyzer
+        opt = OptionsAnalyzer(_client, symbol)
+        pcr = opt.put_call_ratio(by="volume")
+
+        if pcr.empty or "put_call_ratio" not in pcr.columns:
+            return None
+
+        # use front month PCR
+        front_pcr = float(pcr.iloc[0]["put_call_ratio"] or 0)
+        if front_pcr == 0:
+            return None
+
+        if front_pcr > pcr_high:
+            direction = "above"
+            threshold = pcr_high
+            severity  = "critical" if front_pcr > pcr_high * 1.3 else "warning"
+            msg = (f"{symbol} PCR is {front_pcr:.2f} — extreme fear. "
+                   f"Heavy put buying detected (threshold: {pcr_high})")
+        elif front_pcr < pcr_low:
+            direction = "below"
+            threshold = pcr_low
+            severity  = "warning"
+            msg = (f"{symbol} PCR is {front_pcr:.2f} — extreme complacency. "
+                   f"Heavy call buying detected (threshold: {pcr_low})")
+        else:
+            return None
+
+        return AlertResult(
+            alert_name=name,
+            symbol=symbol,
+            message=msg,
+            value=front_pcr,
+            threshold=threshold,
+            direction=direction,
+            severity=severity,
+            extra={"expiry": str(pcr.iloc[0]["expiry"]),
+                   "pcr_high": pcr_high, "pcr_low": pcr_low},
+        )
+
+    return Alert(name=name, symbol=symbol, check_fn=check,
+                 cooldown_min=cooldown_min,
+                 tags=["options", "pcr", "sentiment"])

@@ -3484,3 +3484,954 @@ def extreme_days_concentration(
                       hovermode="x unified")
     return fig
 
+
+
+# ---------------------------------------------------------------------------
+# Options analysis plots
+# ---------------------------------------------------------------------------
+
+def options_chain(
+    opt,
+    expiry: str | None = None,
+    show_volume: bool = True,
+) -> go.Figure:
+    """
+    Options chain — open interest and volume by strike for one expiry.
+
+    Two panels:
+      Top    : Open interest — calls (green) vs puts (red) mirrored
+      Bottom : Volume — same mirror layout
+
+    Reading the chart
+    -----------------
+    • Tall green bars = heavy call OI → resistance level
+    • Tall red bars   = heavy put OI  → support level
+    • Max pain strike shown as vertical dashed line
+    • Current spot price shown as solid line
+
+    Parameters
+    ----------
+    opt    : OptionsAnalyzer instance
+    expiry : expiration date string (default = front month)
+    """
+    from yfinance_api3.classes.options import OptionsAnalyzer
+
+    if expiry is None:
+        expiry = opt.nearest_expiry(0)
+
+    df     = opt.chain(expiry)
+    calls  = df[df["type"] == "call"].set_index("strike")
+    puts   = df[df["type"] == "put"].set_index("strike")
+    spot   = opt._get_spot()
+    mp     = opt.max_pain(expiry)
+    summ   = opt.summary(expiry)
+
+    strikes = sorted(df["strike"].unique())
+
+    call_oi  = [float(calls.loc[s, "open_interest"])  if s in calls.index else 0 for s in strikes]
+    put_oi   = [-float(puts.loc[s, "open_interest"])  if s in puts.index else 0 for s in strikes]
+    call_vol = [float(calls.loc[s, "volume"])          if s in calls.index else 0 for s in strikes]
+    put_vol  = [-float(puts.loc[s, "volume"])           if s in puts.index else 0 for s in strikes]
+
+    n_rows   = 2 if show_volume else 1
+    heights  = [0.55, 0.45] if show_volume else [1.0]
+    titles   = ["Open Interest by strike", "Volume by strike"][:n_rows]
+
+    fig = make_subplots(
+        rows=n_rows, cols=1,
+        row_heights=heights,
+        vertical_spacing=0.08,
+        subplot_titles=titles,
+    )
+
+    # ── OI panel ─────────────────────────────────────────────────────────
+    fig.add_trace(go.Bar(
+        x=strikes, y=call_oi,
+        name="Call OI", marker_color="#1D9E75",
+        marker_line_width=0, opacity=0.8,
+        hovertemplate="Strike: %{x}<br>Call OI: %{y:,.0f}<extra></extra>",
+    ), row=1, col=1)
+
+    fig.add_trace(go.Bar(
+        x=strikes, y=put_oi,
+        name="Put OI", marker_color="#E24B4A",
+        marker_line_width=0, opacity=0.8,
+        hovertemplate="Strike: %{x}<br>Put OI: %{customdata:,.0f}<extra></extra>",
+        customdata=[-v for v in put_oi],
+    ), row=1, col=1)
+
+    # spot + max pain lines
+    for row in range(1, n_rows + 1):
+        fig.add_vline(x=spot, row=row, col=1,
+                      line=dict(color="#2C2C2A", width=1.5),
+                      annotation=dict(text=f"Spot ${spot:,.2f}",
+                                      font=dict(size=10, color="#2C2C2A"),
+                                      yanchor="top") if row == 1 else None)
+        fig.add_vline(x=mp, row=row, col=1,
+                      line=dict(color="#BA7517", width=1.5, dash="dash"),
+                      annotation=dict(text=f"Max pain ${mp:,.0f}",
+                                      font=dict(size=10, color="#BA7517"),
+                                      yanchor="bottom") if row == 1 else None)
+
+    fig.update_yaxes(
+        title_text="Open Interest",
+        tickformat=",",
+        gridcolor="#D3D1C7",
+        tickfont=dict(size=10, color="#888780"),
+        row=1, col=1,
+    )
+
+    # ── Volume panel ──────────────────────────────────────────────────────
+    if show_volume:
+        fig.add_trace(go.Bar(
+            x=strikes, y=call_vol,
+            name="Call Vol", marker_color="#1D9E75",
+            marker_line_width=0, opacity=0.6,
+            showlegend=False,
+            hovertemplate="Strike: %{x}<br>Call Vol: %{y:,.0f}<extra></extra>",
+        ), row=2, col=1)
+
+        fig.add_trace(go.Bar(
+            x=strikes, y=put_vol,
+            name="Put Vol", marker_color="#E24B4A",
+            marker_line_width=0, opacity=0.6,
+            showlegend=False,
+            hovertemplate="Strike: %{x}<br>Put Vol: %{customdata:,.0f}<extra></extra>",
+            customdata=[-v for v in put_vol],
+        ), row=2, col=1)
+
+        fig.update_yaxes(
+            title_text="Volume",
+            tickformat=",",
+            gridcolor="#D3D1C7",
+            tickfont=dict(size=10, color="#888780"),
+            row=2, col=1,
+        )
+
+    for row in range(1, n_rows + 1):
+        fig.update_xaxes(
+            title_text="Strike" if row == n_rows else "",
+            gridcolor="#D3D1C7",
+            tickfont=dict(size=10, color="#888780"),
+            row=row, col=1,
+        )
+
+    from datetime import date
+    dte = (pd.to_datetime(expiry).date() - date.today()).days
+
+    ann = (
+        f"<b>{opt.symbol}  ·  {expiry}  ({dte}d)</b><br>"
+        f"PCR (OI): {summ['put_call_ratio_oi'] or '—'}  ·  "
+        f"PCR (Vol): {summ['put_call_ratio_vol'] or '—'}<br>"
+        f"Call OI: {summ['total_call_oi']:,}  ·  "
+        f"Put OI: {summ['total_put_oi']:,}"
+    )
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.01, y=0.99,
+        text=ann, showarrow=False, align="left",
+        font=dict(size=10, color="#5F5E5A"),
+        bgcolor="rgba(255,255,255,0.88)",
+        bordercolor="#D3D1C7", borderwidth=0.5, borderpad=8,
+    )
+
+    _apply_layout(
+        fig,
+        title=f"{opt.symbol} — Options chain  [{expiry}]",
+        subtitle=f"green = calls  ·  red = puts  ·  mirrored axis  ·  "
+                 f"spot ${spot:,.2f}  ·  max pain ${mp:,.0f}",
+    )
+    fig.update_layout(
+        height=600 if show_volume else 380,
+        barmode="relative",
+        legend=dict(orientation="h", yanchor="bottom", y=1.01,
+                    xanchor="right", x=1, font=dict(size=11)),
+    )
+    return fig
+
+
+def options_surface(
+    opt,
+    max_expiries: int = 8,
+    moneyness_range: tuple[float, float] = (0.80, 1.20),
+) -> go.Figure:
+    """
+    Implied volatility surface heatmap — strike × expiry.
+
+    Reveals:
+    • IV skew (puts typically have higher IV than calls)
+    • Term structure (how IV changes with expiry)
+    • Smile / smirk shape across strikes
+
+    Parameters
+    ----------
+    max_expiries    : number of expiries to include (default 8)
+    moneyness_range : strike filter around spot, e.g. (0.80, 1.20)
+    """
+    surface = opt.vol_surface(max_expiries=max_expiries,
+                               moneyness_range=moneyness_range)
+
+    if surface.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="No surface data available",
+                           xref="paper", yref="paper", x=0.5, y=0.5)
+        return fig
+
+    spot = opt._get_spot()
+
+    fig = go.Figure(data=go.Heatmap(
+        z=surface.values * 100,
+        x=[str(c)[:10] for c in surface.columns],
+        y=surface.index.tolist(),
+        colorscale=[
+            [0.0,  "#1D9E75"],
+            [0.25, "#F4F3EF"],
+            [0.5,  "#F4F3EF"],
+            [0.75, "#BA7517"],
+            [1.0,  "#E24B4A"],
+        ],
+        colorbar=dict(
+            title=dict(text="IV (%)", font=dict(size=12)),
+            tickformat=".0f",
+            tickfont=dict(size=10),
+            outlinewidth=0,
+        ),
+        hovertemplate="Expiry: %{x}<br>Strike: %{y}<br>IV: %{z:.1f}%<extra></extra>",
+        xgap=2, ygap=2,
+    ))
+
+    # mark ATM strikes
+    fig.add_hline(y=spot,
+                  line=dict(color="#2C2C2A", width=1.5, dash="dash"),
+                  annotation=dict(text=f"ATM ${spot:,.2f}",
+                                  font=dict(size=10, color="#2C2C2A")))
+
+    _apply_layout(
+        fig,
+        title=f"{opt.symbol} — Implied Volatility Surface",
+        subtitle=f"strikes ±{int((moneyness_range[1]-1)*100)}% of spot  ·  "
+                 f"{max_expiries} expiries  ·  colour = IV level",
+    )
+    fig.update_xaxes(
+        title_text="Expiry",
+        tickangle=-30,
+        tickfont=dict(size=10, color="#888780"),
+        gridcolor="#D3D1C7",
+    )
+    fig.update_yaxes(
+        title_text="Strike ($)",
+        tickformat="$,.0f",
+        tickfont=dict(size=10, color="#888780"),
+        gridcolor="#D3D1C7",
+    )
+    fig.update_layout(height=550)
+    return fig
+
+
+def options_oi_profile(
+    opt,
+    expiry: str | None = None,
+) -> go.Figure:
+    """
+    Open interest profile — calls vs puts side by side by strike.
+
+    Shows the full OI landscape at a glance:
+    • Where are the biggest positions?
+    • What strikes act as walls (high OI = sticky price)?
+    • Where is max pain vs current spot?
+    """
+    if expiry is None:
+        expiry = opt.nearest_expiry(0)
+
+    oi    = opt.oi_by_strike(expiry)
+    spot  = opt._get_spot()
+    mp    = opt.max_pain(expiry)
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=oi["strike"], y=oi["call_oi"],
+        name="Call OI",
+        marker_color="#1D9E75", marker_line_width=0, opacity=0.85,
+        hovertemplate="Strike: %{x}<br>Call OI: %{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=oi["strike"], y=oi["put_oi"],
+        name="Put OI",
+        marker_color="#E24B4A", marker_line_width=0, opacity=0.85,
+        hovertemplate="Strike: %{x}<br>Put OI: %{y:,.0f}<extra></extra>",
+    ))
+
+    fig.add_vline(x=spot,
+                  line=dict(color="#2C2C2A", width=2),
+                  annotation=dict(text=f"Spot ${spot:,.2f}",
+                                  font=dict(size=11, color="#2C2C2A"),
+                                  yanchor="top"))
+    fig.add_vline(x=mp,
+                  line=dict(color="#BA7517", width=1.5, dash="dash"),
+                  annotation=dict(text=f"Max pain ${mp:,.0f}",
+                                  font=dict(size=11, color="#BA7517"),
+                                  yanchor="bottom"))
+
+    _apply_layout(
+        fig,
+        title=f"{opt.symbol} — OI Profile  [{expiry}]",
+        subtitle=f"green = call OI (resistance)  ·  red = put OI (support)  ·  "
+                 f"spot ${spot:,.2f}  ·  max pain ${mp:,.0f}",
+    )
+    fig.update_xaxes(title_text="Strike ($)", tickformat="$,.0f",
+                     gridcolor="#D3D1C7", tickfont=dict(size=10, color="#888780"))
+    fig.update_yaxes(title_text="Open Interest", tickformat=",",
+                     gridcolor="#D3D1C7", tickfont=dict(size=10, color="#888780"))
+    fig.update_layout(
+        height=420,
+        barmode="group",
+        bargap=0.1,
+        legend=dict(orientation="h", yanchor="bottom", y=1.01,
+                    xanchor="right", x=1, font=dict(size=11)),
+    )
+    return fig
+
+
+def options_put_call(
+    opt,
+    by: str = "oi",
+    max_expiries: int = 12,
+) -> go.Figure:
+    """
+    Put/Call ratio across all expiries.
+
+    Shows sentiment term structure — whether the market is positioned
+    more defensively (high PCR) or bullishly (low PCR) at each expiry.
+
+    Parameters
+    ----------
+    by           : "oi" (open interest) or "volume"
+    max_expiries : number of expiries to show (default 12)
+
+    Reading the chart
+    -----------------
+    PCR > 1.5 → heavy put buying = fear / hedging
+    PCR 0.7–1.0 → neutral
+    PCR < 0.7   → call heavy = bullish / speculative
+    """
+    pcr = opt.put_call_ratio(by=by).head(max_expiries)
+
+    if pcr.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="No PCR data", xref="paper",
+                           yref="paper", x=0.5, y=0.5)
+        return fig
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.6, 0.4],
+        vertical_spacing=0.10,
+        subplot_titles=["Put/Call ratio by expiry",
+                        f"Call vs Put {'OI' if by=='oi' else 'Volume'}"],
+    )
+
+    # colour bars by PCR level
+    bar_colors = [
+        "#E24B4A" if v > 1.2 else "#1D9E75" if v < 0.8 else "#BA7517"
+        for v in pcr["put_call_ratio"].fillna(1.0)
+    ]
+
+    fig.add_trace(go.Bar(
+        x=pcr["expiry"], y=pcr["put_call_ratio"],
+        marker_color=bar_colors, marker_line_width=0,
+        name="PCR",
+        text=[f"{v:.2f}" for v in pcr["put_call_ratio"].fillna(0)],
+        textposition="outside",
+        textfont=dict(size=10),
+        hovertemplate="Expiry: %{x}<br>PCR: %{y:.2f}<extra></extra>",
+    ), row=1, col=1)
+
+    # reference lines
+    for level, color, label in [(1.2, "#E24B4A", "Bearish 1.2"),
+                                  (1.0, "#888780", "Neutral 1.0"),
+                                  (0.7, "#1D9E75", "Bullish 0.7")]:
+        fig.add_hline(y=level, row=1, col=1,
+                      line=dict(color=color, width=1, dash="dot"),
+                      annotation=dict(text=label,
+                                      font=dict(size=9, color=color),
+                                      xanchor="left"))
+
+    fig.update_xaxes(tickangle=-30, tickfont=dict(size=9, color="#888780"),
+                     gridcolor="#D3D1C7", row=1, col=1)
+    fig.update_yaxes(title_text="Put/Call Ratio",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"),
+                     row=1, col=1)
+
+    # stacked call/put bars
+    col_name = f"call_{by}"
+    put_col  = f"put_{by}"
+    fig.add_trace(go.Bar(
+        x=pcr["expiry"], y=pcr[col_name],
+        name=f"Call {'OI' if by=='oi' else 'Vol'}",
+        marker_color="#1D9E75", marker_line_width=0, opacity=0.8,
+        hovertemplate="Expiry: %{x}<br>Calls: %{y:,.0f}<extra></extra>",
+    ), row=2, col=1)
+    fig.add_trace(go.Bar(
+        x=pcr["expiry"], y=pcr[put_col],
+        name=f"Put {'OI' if by=='oi' else 'Vol'}",
+        marker_color="#E24B4A", marker_line_width=0, opacity=0.8,
+        hovertemplate="Expiry: %{x}<br>Puts: %{y:,.0f}<extra></extra>",
+    ), row=2, col=1)
+
+    fig.update_xaxes(tickangle=-30, tickfont=dict(size=9, color="#888780"),
+                     gridcolor="#D3D1C7", row=2, col=1)
+    fig.update_yaxes(title_text="Contracts", tickformat=",",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"),
+                     row=2, col=1)
+
+    _apply_layout(
+        fig,
+        title=f"{opt.symbol} — Put/Call Ratio  (by {by.upper()})",
+        subtitle=(
+            "red > 1.2 = bearish  ·  orange = neutral  ·  "
+            "green < 0.7 = bullish"
+        ),
+    )
+    fig.update_layout(
+        height=580,
+        barmode="group",
+        legend=dict(orientation="h", yanchor="bottom", y=1.01,
+                    xanchor="right", x=1, font=dict(size=11)),
+    )
+    return fig
+
+
+def options_max_pain(
+    opt,
+    max_expiries: int = 12,
+) -> go.Figure:
+    """
+    Max pain (knockout) strike price across all expiries.
+
+    Shows how the max pain level evolves across the options term structure.
+    Compare with current spot to understand where the market is positioned
+    relative to where option buyers lose the most.
+
+    A max pain strike well below spot → large downside hedges in place.
+    A max pain strike close to spot → balanced positioning, price may pin.
+
+    Parameters
+    ----------
+    max_expiries : number of expiries to include (default 12 ≈ 1 year)
+    """
+    from datetime import date
+
+    expiries = opt.expiries()[:max_expiries]
+    spot     = opt._get_spot()
+    today    = date.today()
+
+    rows = []
+    for exp in expiries:
+        try:
+            mp  = opt.max_pain(exp)
+            dte = (pd.to_datetime(exp).date() - today).days
+            rows.append({
+                "expiry":        exp,
+                "days_to_expiry": dte,
+                "max_pain":      mp,
+                "vs_spot":       (mp - spot) / spot,   # % above/below spot
+            })
+        except Exception as e:
+            print(f"Skipping {exp}: {e}")
+
+    if not rows:
+        fig = go.Figure()
+        fig.add_annotation(text="No max pain data available",
+                           xref="paper", yref="paper", x=0.5, y=0.5)
+        return fig
+
+    df = pd.DataFrame(rows)
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.65, 0.35],
+        vertical_spacing=0.10,
+        subplot_titles=[
+            "Max pain strike vs spot price by expiry",
+            "Max pain distance from spot (%)",
+        ],
+    )
+
+    # ── Panel 1: max pain line + spot reference ───────────────────────────
+    # colour each point by distance from spot
+    point_colors = [
+        "#E24B4A" if v < -0.02 else
+        "#1D9E75" if v > 0.02  else
+        "#BA7517"
+        for v in df["vs_spot"]
+    ]
+
+    fig.add_trace(go.Scatter(
+        x=df["expiry"], y=df["max_pain"],
+        mode="lines+markers",
+        line=dict(color="#378ADD", width=2),
+        marker=dict(
+            size=10,
+            color=point_colors,
+            line=dict(color="white", width=1.5),
+        ),
+        name="Max pain",
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Max pain: $%{y:,.2f}<br>"
+            "DTE: %{customdata[0]}d<br>"
+            "vs Spot: %{customdata[1]:+.1%}"
+            "<extra></extra>"
+        ),
+        customdata=df[["days_to_expiry", "vs_spot"]].values,
+    ), row=1, col=1)
+
+    # spot line
+    fig.add_hline(
+        y=spot, row=1, col=1,
+        line=dict(color="#2C2C2A", width=1.5, dash="dash"),
+        annotation=dict(
+            text=f"Spot ${spot:,.2f}",
+            font=dict(size=11, color="#2C2C2A"),
+            xanchor="left",
+        ),
+    )
+
+    # shaded zone ±2% around spot
+    fig.add_hrect(
+        y0=spot * 0.98, y1=spot * 1.02,
+        row=1, col=1,
+        fillcolor="rgba(180,178,169,0.12)",
+        line_width=0,
+        annotation=dict(
+            text="±2% pin zone",
+            font=dict(size=9, color="#888780"),
+            xanchor="right", x=1,
+        ),
+    )
+
+    fig.update_xaxes(
+        tickangle=-30,
+        tickfont=dict(size=10, color="#888780"),
+        gridcolor="#D3D1C7",
+        row=1, col=1,
+    )
+    fig.update_yaxes(
+        title_text="Strike ($)",
+        tickformat="$,.0f",
+        gridcolor="#D3D1C7",
+        tickfont=dict(size=11, color="#888780"),
+        row=1, col=1,
+    )
+
+    # ── Panel 2: distance from spot bar chart ─────────────────────────────
+    bar_colors2 = [
+        "#E24B4A" if v < 0 else "#1D9E75"
+        for v in df["vs_spot"]
+    ]
+
+    fig.add_trace(go.Bar(
+        x=df["expiry"], y=df["vs_spot"] * 100,
+        marker_color=bar_colors2,
+        marker_line_width=0,
+        name="vs Spot %",
+        text=[f"{v:+.1f}%" for v in df["vs_spot"] * 100],
+        textposition="outside",
+        textfont=dict(size=9),
+        showlegend=False,
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Max pain vs spot: %{y:+.1f}%"
+            "<extra></extra>"
+        ),
+    ), row=2, col=1)
+
+    fig.add_hline(y=0, row=2, col=1,
+                  line=dict(color="#B4B2A9", width=0.8, dash="dash"))
+    fig.add_hline(y=2, row=2, col=1,
+                  line=dict(color="#1D9E75", width=0.8, dash="dot"))
+    fig.add_hline(y=-2, row=2, col=1,
+                  line=dict(color="#E24B4A", width=0.8, dash="dot"))
+
+    fig.update_xaxes(
+        tickangle=-30,
+        tickfont=dict(size=10, color="#888780"),
+        gridcolor="#D3D1C7",
+        row=2, col=1,
+    )
+    fig.update_yaxes(
+        title_text="Distance (%)",
+        tickformat="+.1f",
+        ticksuffix="%",
+        gridcolor="#D3D1C7",
+        tickfont=dict(size=10, color="#888780"),
+        row=2, col=1,
+        zeroline=True,
+        zerolinecolor="#B4B2A9",
+    )
+
+    # annotation
+    closest = df.iloc[(df["vs_spot"].abs()).argmin()]
+    ann = (
+        f"<b>{opt.symbol}  ·  {len(rows)} expiries</b><br>"
+        f"Spot: ${spot:,.2f}<br>"
+        f"Nearest pin: {closest['expiry']} "
+        f"(${closest['max_pain']:,.2f}, "
+        f"{closest['vs_spot']:+.1%} from spot)"
+    )
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.01, y=0.99,
+        text=ann, showarrow=False, align="left",
+        font=dict(size=10, color="#5F5E5A"),
+        bgcolor="rgba(255,255,255,0.88)",
+        bordercolor="#D3D1C7", borderwidth=0.5, borderpad=8,
+    )
+
+    _apply_layout(
+        fig,
+        title=f"{opt.symbol} — Max pain (knockout) price by expiry",
+        subtitle=(
+            f"spot ${spot:,.2f}  ·  shaded = ±2% pin zone  ·  "
+            "green = pain above spot  ·  red = pain below spot"
+        ),
+    )
+    fig.update_layout(
+        height=600,
+        legend=dict(orientation="h", yanchor="bottom", y=1.01,
+                    xanchor="right", x=1, font=dict(size=11)),
+    )
+    return fig
+
+
+def options_gex(
+    opt,
+    max_expiries: int = 12,
+    risk_free_rate: float = 0.05,
+) -> go.Figure:
+    """
+    Gamma Exposure (GEX) — three panels showing the complete picture.
+
+    Panel 1 : GEX by strike (front month) — where gamma is concentrated
+    Panel 2 : GEX by expiry — term structure of gamma exposure
+    Panel 3 : Grand total GEX — market regime indicator
+
+    Reading GEX
+    -----------
+    Positive GEX : market makers long gamma → stabilising regime
+                   they sell rallies and buy dips → low realised vol
+    Negative GEX : market makers short gamma → amplifying regime
+                   they buy rallies and sell dips → high realised vol
+    GEX flip     : the strike/level where GEX crosses zero — key threshold
+    """
+    from datetime import date
+
+    spot     = opt._get_spot()
+    total    = opt.gex_total(max_expiries, risk_free_rate)
+    by_exp   = opt.gex_by_expiry(max_expiries, risk_free_rate)
+    front    = opt.nearest_expiry(0)
+    by_strike = opt.gex_by_strike(front, risk_free_rate)
+
+    grand_total  = float(total.get("total_net_gex", 0))
+    regime_color = "#1D9E75" if grand_total > 0 else "#E24B4A"
+    flip         = total.get("flip_strike")
+
+    fig = make_subplots(
+        rows=3, cols=1,
+        row_heights=[0.42, 0.32, 0.26],
+        vertical_spacing=0.09,
+        subplot_titles=[
+            f"GEX by strike — {front} (front month)",
+            "Total GEX by expiry ($)",
+            "Grand total GEX — market regime",
+        ],
+    )
+
+    # ── Panel 1: GEX by strike ────────────────────────────────────────────
+    colors_strike = [
+        "#1D9E75" if v >= 0 else "#E24B4A"
+        for v in by_strike["net_gex"]
+    ]
+
+    fig.add_trace(go.Bar(
+        x=by_strike["strike"],
+        y=by_strike["net_gex"] / 1e6,   # show in millions
+        marker_color=colors_strike,
+        marker_line_width=0,
+        name="Net GEX",
+        showlegend=False,
+        hovertemplate=(
+            "Strike: $%{x:,.0f}<br>"
+            "Net GEX: $%{customdata:,.0f}<extra></extra>"
+        ),
+        customdata=by_strike["net_gex"].values,
+    ), row=1, col=1)
+
+    # spot and flip lines
+    fig.add_vline(x=spot, row=1, col=1,
+                  line=dict(color="#2C2C2A", width=1.5),
+                  annotation=dict(text=f"Spot ${spot:,.2f}",
+                                  font=dict(size=10, color="#2C2C2A"),
+                                  yanchor="top"))
+
+    flip = total.get("flip_strike")
+    if flip is not None:
+        try:
+            fig.add_vline(x=float(flip), row=1, col=1,
+                          line=dict(color="#BA7517", width=1.5, dash="dash"),
+                          annotation=dict(text=f"GEX flip ${float(flip):,.0f}",
+                                          font=dict(size=9, color="#BA7517")))
+        except Exception:
+            pass
+
+    fig.add_hline(y=0, row=1, col=1,
+                  line=dict(color="#B4B2A9", width=0.8))
+
+    fig.update_xaxes(title_text="Strike ($)", tickformat="$,.0f",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"), row=1, col=1)
+    fig.update_yaxes(title_text="GEX ($M)",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"),
+                     tickformat=".1f", row=1, col=1)
+
+    # ── Panel 2: GEX by expiry ────────────────────────────────────────────
+    colors_exp = [
+        "#1D9E75" if v >= 0 else "#E24B4A"
+        for v in by_exp["net_gex"]
+    ]
+
+    fig.add_trace(go.Bar(
+        x=by_exp["expiry"],
+        y=by_exp["net_gex"] / 1e6,
+        marker_color=colors_exp,
+        marker_line_width=0,
+        name="GEX by expiry",
+        showlegend=False,
+        customdata=by_exp[["net_gex", "call_gex", "put_gex",
+                            "days_to_expiry"]].values,
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Net GEX: $%{customdata[0]:,.0f}<br>"
+            "Call GEX: $%{customdata[1]:,.0f}<br>"
+            "Put GEX: $%{customdata[2]:,.0f}<br>"
+            "DTE: %{customdata[3]}d"
+            "<extra></extra>"
+        ),
+    ), row=2, col=1)
+
+    fig.add_hline(y=0, row=2, col=1,
+                  line=dict(color="#B4B2A9", width=0.8))
+
+    fig.update_xaxes(tickangle=-30, tickfont=dict(size=9, color="#888780"),
+                     gridcolor="#D3D1C7", row=2, col=1)
+    fig.update_yaxes(title_text="GEX ($M)", tickformat=".1f",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"), row=2, col=1)
+
+    # ── Panel 3: grand total gauge bar ───────────────────────────────────
+    fig.add_trace(go.Bar(
+        x=["Grand Total GEX"],
+        y=[grand_total / 1e6],
+        marker_color=regime_color,
+        marker_line_width=0,
+        showlegend=False,
+        text=[f"${grand_total/1e6:+.1f}M"],
+        textposition="outside",
+        textfont=dict(size=14, color=regime_color),
+        hovertemplate=f"Grand Total GEX: ${grand_total:,.0f}<extra></extra>",
+    ), row=3, col=1)
+
+    fig.add_hline(y=0, row=3, col=1,
+                  line=dict(color="#B4B2A9", width=1.5))
+
+    fig.update_xaxes(visible=False, row=3, col=1)
+    fig.update_yaxes(title_text="GEX ($M)", tickformat=".1f",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"), row=3, col=1)
+
+    # regime annotation
+    regime_label = total.get("regime_label", "")
+    flips        = total.get("gex_flip_strikes", [])
+    ann = (
+        f"<b style='color:{regime_color}'>"
+        f"{'🟢' if grand_total > 0 else '🔴'} "
+        f"{'LONG' if grand_total > 0 else 'SHORT'} GAMMA REGIME</b><br>"
+        f"Grand Total GEX: ${grand_total/1e6:+.1f}M<br>"
+        f"GEX flip: {'$' + f'{total["flip_strike"]:,.0f}' if total.get('flip_strike') else 'none'}<br>"
+        f"Dominant expiry: {total.get('dominant_expiry', '—')}"
+    )
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.01, y=0.99,
+        text=ann, showarrow=False, align="left",
+        font=dict(size=11, color="#5F5E5A"),
+        bgcolor="rgba(255,255,255,0.90)",
+        bordercolor=regime_color, borderwidth=1.5, borderpad=10,
+    )
+
+    _apply_layout(
+        fig,
+        title=f"{opt.symbol} — Gamma Exposure (GEX)",
+        subtitle=(
+            f"spot ${spot:,.2f}  ·  {max_expiries} expiries  ·  "
+            f"green = long gamma (stabilising)  ·  red = short gamma (amplifying)"
+        ),
+    )
+    fig.update_layout(height=800)
+    return fig
+
+
+def options_unusual(
+    opt,
+    vol_oi_threshold: float = 3.0,
+    min_volume: int = 100,
+    min_oi: int = 50,
+    top_n: int = 30,
+) -> go.Figure:
+    """
+    Unusual options activity scanner.
+
+    Flags strikes where today's volume is significantly higher than open
+    interest — a sign of new institutional positioning.
+
+    vol/OI > 3 : 3x more volume than existing OI → new positions opening
+    vol/OI > 10: extreme unusual activity → potential informed trading
+
+    Two panels
+    ----------
+    Top    : vol/OI ratio bubble chart — size = volume, colour = call/put
+    Bottom : volume vs OI scatter — points above the diagonal = unusual
+    """
+    unusual = opt.unusual_activity(
+        vol_oi_threshold=vol_oi_threshold,
+        min_volume=min_volume,
+        min_oi=min_oi,
+    ).head(top_n)
+
+    if unusual.empty:
+        fig = go.Figure()
+        fig.add_annotation(
+            text=f"No unusual activity found (threshold: vol/OI > {vol_oi_threshold}x)",
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            font=dict(size=14, color="#888780"),
+        )
+        _apply_layout(fig, title=f"{opt.symbol} — Unusual Options Activity",
+                      subtitle="No alerts")
+        return fig
+
+    calls_u = unusual[unusual["type"] == "call"]
+    puts_u  = unusual[unusual["type"] == "put"]
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.55, 0.45],
+        vertical_spacing=0.10,
+        subplot_titles=[
+            f"Vol/OI ratio by strike (top {top_n} unusual strikes)",
+            "Volume vs Open Interest — points above diagonal = unusual",
+        ],
+    )
+
+    # ── Panel 1: vol/OI ratio bars ────────────────────────────────────────
+    for subset, color, label in [
+        (calls_u, "#1D9E75", "Call"),
+        (puts_u,  "#E24B4A", "Put"),
+    ]:
+        if subset.empty:
+            continue
+        label_col = subset["expiry"].str[:10] + " $" + subset["strike"].astype(str)
+        fig.add_trace(go.Bar(
+            x=label_col,
+            y=subset["vol_oi_ratio"],
+            name=f"{label} — unusual",
+            marker_color=color,
+            marker_line_width=0,
+            opacity=0.85,
+            text=[f"{v:.0f}x" for v in subset["vol_oi_ratio"]],
+            textposition="outside",
+            textfont=dict(size=9),
+            customdata=subset[["volume", "open_interest",
+                                "implied_volatility", "signal"]].values,
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "Vol/OI: %{y:.1f}x<br>"
+                "Volume: %{customdata[0]:,.0f}<br>"
+                "OI: %{customdata[1]:,.0f}<br>"
+                "IV: %{customdata[2]:.1%}<br>"
+                "Signal: %{customdata[3]}<extra></extra>"
+            ),
+        ), row=1, col=1)
+
+    fig.add_hline(y=vol_oi_threshold, row=1, col=1,
+                  line=dict(color="#BA7517", width=1, dash="dot"),
+                  annotation=dict(text=f"{vol_oi_threshold}x threshold",
+                                  font=dict(size=9, color="#BA7517")))
+
+    fig.update_xaxes(tickangle=-45, tickfont=dict(size=9, color="#888780"),
+                     gridcolor="#D3D1C7", row=1, col=1)
+    fig.update_yaxes(title_text="Volume / OI ratio",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"), row=1, col=1)
+
+    # ── Panel 2: volume vs OI scatter ────────────────────────────────────
+    for subset, color, label in [
+        (calls_u, "#1D9E75", "Calls"),
+        (puts_u,  "#E24B4A", "Puts"),
+    ]:
+        if subset.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=subset["open_interest"],
+            y=subset["volume"],
+            mode="markers",
+            name=label,
+            marker=dict(
+                size=np.clip(np.sqrt(subset["vol_oi_ratio"]) * 8, 8, 40),
+                color=color,
+                opacity=0.8,
+                line=dict(color="white", width=1),
+            ),
+            customdata=subset[["strike", "expiry", "vol_oi_ratio",
+                                "signal"]].values,
+            hovertemplate=(
+                "Strike: $%{customdata[0]:,.0f}  %{customdata[1]}<br>"
+                "Volume: %{y:,.0f}<br>"
+                "OI: %{x:,.0f}<br>"
+                "Vol/OI: %{customdata[2]:.1f}x<br>"
+                "Signal: %{customdata[3]}<extra></extra>"
+            ),
+        ), row=2, col=1)
+
+    # diagonal line (vol = OI)
+    max_val = max(unusual["volume"].max(), unusual["open_interest"].max())
+    fig.add_trace(go.Scatter(
+        x=[0, max_val], y=[0, max_val],
+        mode="lines",
+        line=dict(color="#D3D1C7", width=1, dash="dot"),
+        showlegend=False,
+        hoverinfo="skip",
+    ), row=2, col=1)
+
+    fig.update_xaxes(title_text="Open Interest", tickformat=",",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"), row=2, col=1)
+    fig.update_yaxes(title_text="Volume", tickformat=",",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"), row=2, col=1)
+
+    _apply_layout(
+        fig,
+        title=f"{opt.symbol} — Unusual Options Activity",
+        subtitle=(
+            f"vol/OI > {vol_oi_threshold}x  ·  min volume {min_volume:,}  ·  "
+            f"green = calls  ·  red = puts  ·  bubble size = ratio magnitude"
+        ),
+    )
+    fig.update_layout(
+        height=700,
+        barmode="group",
+        legend=dict(orientation="h", yanchor="bottom", y=1.01,
+                    xanchor="right", x=1, font=dict(size=11)),
+    )
+    return fig
