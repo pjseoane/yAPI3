@@ -4435,3 +4435,364 @@ def options_unusual(
                     xanchor="right", x=1, font=dict(size=11)),
     )
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Options strategy plots
+# ---------------------------------------------------------------------------
+
+def strategy_payoff(strat) -> go.Figure:
+    """
+    Strategy P&L at expiry + breakevens + key levels.
+
+    Two panels:
+      Top    : P&L curve at expiry — one line per leg + combined
+      Bottom : Greeks (delta) across the same price range
+
+    Reading the chart
+    -----------------
+    • Green zone = profitable region
+    • Red zone   = loss region
+    • Dashed vertical lines = breakeven prices
+    • Solid vertical line   = current spot price
+    • Dot-dash line         = max profit / max loss levels
+    """
+    df     = strat.payoff(n_points=300)
+    summ   = strat.summary()
+    spot   = strat._spot
+    be     = summ["breakevens"]
+    mp     = summ["max_profit"]
+    ml     = summ["max_loss"]
+
+    # Greeks for bottom panel
+    gdf = strat.greeks_profile(
+        spot_range=(float(df["spot"].min()), float(df["spot"].max())),
+        n_points=300,
+    )
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.68, 0.32],
+        vertical_spacing=0.08,
+        subplot_titles=[
+            f"P&L at expiry — {strat.name}",
+            "Portfolio Delta across price range",
+        ],
+    )
+
+    # ── shaded profit/loss zones ──────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=df["spot"], y=df["pnl"].clip(lower=0),
+        fill="tozeroy", fillcolor="rgba(29,158,117,0.10)",
+        line=dict(width=0), showlegend=False, hoverinfo="skip",
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=df["spot"], y=df["pnl"].clip(upper=0),
+        fill="tozeroy", fillcolor="rgba(226,75,74,0.10)",
+        line=dict(width=0), showlegend=False, hoverinfo="skip",
+    ), row=1, col=1)
+
+    # ── individual leg P&L ────────────────────────────────────────────────
+    leg_cols = [c for c in df.columns if c.startswith("leg_")]
+    leg_colors = ["#378ADD", "#BA7517", "#9B59B6", "#E67E22", "#1ABC9C"]
+    for i, col in enumerate(leg_cols):
+        leg = strat.legs[i]
+        label = f"{leg.direction.capitalize()} {leg.option_type} ${leg.strike:,.0f}"
+        fig.add_trace(go.Scatter(
+            x=df["spot"], y=df[col],
+            mode="lines",
+            line=dict(color=leg_colors[i % len(leg_colors)],
+                      width=1.2, dash="dot"),
+            name=label, opacity=0.7,
+            hovertemplate=f"{label}<br>Spot: $%{{x:,.2f}}<br>P&L: $%{{y:,.2f}}<extra></extra>",
+        ), row=1, col=1)
+
+    # ── combined P&L ─────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=df["spot"], y=df["pnl"],
+        mode="lines",
+        line=dict(color="#2C2C2A", width=2.5),
+        name="Combined P&L",
+        hovertemplate="Spot: $%{x:,.2f}<br>P&L: $%{y:,.2f}<extra></extra>",
+    ), row=1, col=1)
+
+    # zero line
+    fig.add_hline(y=0, row=1, col=1,
+                  line=dict(color="#B4B2A9", width=1))
+
+    # spot line
+    fig.add_vline(x=spot, row=1, col=1,
+                  line=dict(color="#2C2C2A", width=1.5),
+                  annotation=dict(text=f"Spot ${spot:,.2f}",
+                                  font=dict(size=10, color="#2C2C2A"),
+                                  yanchor="top"))
+
+    # breakeven lines
+    for b in be:
+        fig.add_vline(x=b, row=1, col=1,
+                      line=dict(color="#BA7517", width=1.2, dash="dash"),
+                      annotation=dict(text=f"BE ${b:,.2f}",
+                                      font=dict(size=9, color="#BA7517")))
+
+    # max profit / max loss annotations
+    if not summ["max_profit_unlimited"]:
+        fig.add_annotation(
+            x=summ["max_profit_at"], y=mp,
+            xref="x", yref="y",
+            text=f"Max profit<br>${mp:,.0f}",
+            showarrow=True, arrowhead=2,
+            font=dict(size=9, color="#1D9E75"),
+            arrowcolor="#1D9E75", ax=0, ay=-30,
+        )
+    if not summ["max_loss_unlimited"]:
+        fig.add_annotation(
+            x=summ["max_loss_at"], y=ml,
+            xref="x", yref="y",
+            text=f"Max loss<br>${ml:,.0f}",
+            showarrow=True, arrowhead=2,
+            font=dict(size=9, color="#E24B4A"),
+            arrowcolor="#E24B4A", ax=0, ay=30,
+        )
+
+    fig.update_xaxes(tickformat="$,.0f", gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"), row=1, col=1)
+    fig.update_yaxes(title_text="P&L ($)", tickformat="$,.0f",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"),
+                     zeroline=True, zerolinecolor="#B4B2A9", row=1, col=1)
+
+    # ── delta panel ───────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=gdf["spot"], y=gdf["delta"],
+        mode="lines",
+        line=dict(color="#378ADD", width=2),
+        name="Delta",
+        showlegend=True,
+        hovertemplate="Spot: $%{x:,.2f}<br>Delta: %{y:+.3f}<extra></extra>",
+    ), row=2, col=1)
+
+    fig.add_hline(y=0, row=2, col=1,
+                  line=dict(color="#B4B2A9", width=0.8))
+    fig.add_vline(x=spot, row=2, col=1,
+                  line=dict(color="#2C2C2A", width=1, dash="dot"))
+
+    fig.update_xaxes(title_text="Underlying price ($)", tickformat="$,.0f",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"), row=2, col=1)
+    fig.update_yaxes(title_text="Delta", tickformat="+.2f",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"),
+                     zeroline=True, zerolinecolor="#B4B2A9", row=2, col=1)
+
+    # summary annotation
+    be_str  = "  ·  ".join(f"${b:,.2f}" for b in be) if be else "none"
+    mp_str  = "unlimited" if summ["max_profit_unlimited"] else f"${mp:,.0f}"
+    ml_str  = "unlimited" if summ["max_loss_unlimited"]   else f"${ml:,.0f}"
+    ann = (
+        f"<b>{strat.name}  —  {strat.opt.symbol}</b><br>"
+        f"Net premium: ${abs(summ['net_premium']):,.2f} {summ['net_premium_dir']}<br>"
+        f"Max profit: {mp_str}<br>"
+        f"Max loss:   {ml_str}<br>"
+        f"Risk/reward: {summ['risk_reward']:.2f}x<br>"
+        f"Breakevens: {be_str}"
+    )
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.01, y=0.99,
+        text=ann, showarrow=False, align="left",
+        font=dict(size=10, color="#5F5E5A"),
+        bgcolor="rgba(255,255,255,0.90)",
+        bordercolor="#D3D1C7", borderwidth=0.5, borderpad=10,
+    )
+
+    _apply_layout(
+        fig,
+        title=f"{strat.opt.symbol} — {strat.name}",
+        subtitle=(
+            f"spot ${spot:,.2f}  ·  "
+            f"{len(strat.legs)} legs  ·  "
+            f"green = profit zone  ·  red = loss zone"
+        ),
+    )
+    fig.update_layout(
+        height=650,
+        legend=dict(orientation="h", yanchor="bottom", y=1.01,
+                    xanchor="right", x=1, font=dict(size=10)),
+    )
+    return fig
+
+
+def strategy_surface(strat, n_spots: int = 60, n_days: int = 20) -> go.Figure:
+    """
+    P&L surface across underlying price × time (days until expiry).
+
+    Shows how the strategy P&L evolves as both price and time change —
+    critical for understanding time decay (theta) and how the position
+    deteriorates or improves with each passing day.
+
+    Reading the surface
+    -------------------
+    • Green areas  = profit
+    • Red areas    = loss
+    • The rightmost column (days=0) = payoff at expiry
+    • Moving left shows how P&L changes with time remaining
+    """
+    surface = strat.pnl_surface(n_spots=n_spots, n_days=n_days)
+    spot    = strat._spot
+    summ    = strat.summary()
+
+    spots   = [float(c) for c in surface.columns]
+    days    = surface.index.tolist()
+    z       = surface.values.tolist()
+
+    # symmetric color scale centred at 0
+    max_abs = max(abs(surface.values.min()), abs(surface.values.max()))
+
+    fig = go.Figure(data=go.Heatmap(
+        x=spots,
+        y=days,
+        z=z,
+        colorscale=[
+            [0.00, "#E24B4A"],
+            [0.45, "#F9E8E8"],
+            [0.50, "#F4F3EF"],
+            [0.55, "#E8F5F0"],
+            [1.00, "#1D9E75"],
+        ],
+        zmid=0,
+        zmin=-max_abs,
+        zmax=max_abs,
+        colorbar=dict(
+            title=dict(text="P&L ($)", font=dict(size=12)),
+            tickformat="$,.0f",
+            tickfont=dict(size=10),
+            outlinewidth=0,
+        ),
+        hovertemplate=(
+            "Spot: $%{x:,.2f}<br>"
+            "Days ahead: %{y}d<br>"
+            "P&L: $%{z:,.2f}<extra></extra>"
+        ),
+        xgap=1, ygap=1,
+    ))
+
+    # spot line
+    fig.add_vline(x=spot,
+                  line=dict(color="#2C2C2A", width=1.5, dash="dash"),
+                  annotation=dict(text=f"Spot ${spot:,.2f}",
+                                  font=dict(size=10, color="#2C2C2A")))
+
+    # breakeven lines
+    for be in summ["breakevens"]:
+        fig.add_vline(x=be,
+                      line=dict(color="#BA7517", width=1, dash="dot"),
+                      annotation=dict(text=f"BE ${be:,.2f}",
+                                      font=dict(size=9, color="#BA7517")))
+
+    _apply_layout(
+        fig,
+        title=f"{strat.opt.symbol} — {strat.name} — P&L Surface",
+        subtitle=(
+            f"x-axis = underlying price  ·  "
+            f"y-axis = days until front expiry  ·  "
+            f"green = profit  ·  red = loss"
+        ),
+    )
+    fig.update_xaxes(title_text="Underlying price ($)", tickformat="$,.0f",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"))
+    fig.update_yaxes(title_text="Days ahead", gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"),
+                     autorange="reversed")
+    fig.update_layout(height=500)
+    return fig
+
+
+def strategy_greeks(strat) -> go.Figure:
+    """
+    Portfolio Greeks across underlying price range.
+
+    Four panels — one per Greek:
+      Delta : directional exposure (positive = long, negative = short)
+      Gamma : rate of delta change (always positive for long options)
+      Theta : daily time decay (negative = losing value each day)
+      Vega  : IV sensitivity (positive = benefits from IV expansion)
+
+    Reading Greeks
+    --------------
+    • Delta  ≈ 0   → delta-neutral (market-direction independent)
+    • Gamma  high  → position becomes more directional quickly
+    • Theta  large negative → expensive to hold, time is working against you
+    • Vega   positive → long volatility, wants IV to rise (e.g. straddles)
+    • Vega   negative → short volatility, wants IV to fall (e.g. iron condors)
+    """
+    spot   = strat._spot
+    lo, hi = spot * 0.80, spot * 1.20
+    gdf    = strat.greeks_profile(spot_range=(lo, hi), n_points=200)
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=["Delta (Δ)", "Gamma (Γ)", "Theta (Θ) — daily",
+                        "Vega (V) — per 1% IV"],
+        vertical_spacing=0.14,
+        horizontal_spacing=0.10,
+    )
+
+    greek_cfg = [
+        ("delta", "#378ADD", 1, 1, "+.3f"),
+        ("gamma", "#1D9E75", 1, 2, "+.5f"),
+        ("theta", "#E24B4A", 2, 1, "+.4f"),
+        ("vega",  "#BA7517", 2, 2, "+.4f"),
+    ]
+
+    for greek, color, row, col, fmt in greek_cfg:
+        fig.add_trace(go.Scatter(
+            x=gdf["spot"], y=gdf[greek],
+            mode="lines",
+            line=dict(color=color, width=2.2),
+            name=greek.capitalize(),
+            showlegend=False,
+            hovertemplate=(
+                f"Spot: $%{{x:,.2f}}<br>"
+                f"{greek.capitalize()}: %{{y:{fmt}}}<extra></extra>"
+            ),
+        ), row=row, col=col)
+
+        # zero line
+        fig.add_hline(y=0, row=row, col=col,
+                      line=dict(color="#B4B2A9", width=0.8))
+        # spot line
+        fig.add_vline(x=spot, row=row, col=col,
+                      line=dict(color="#2C2C2A", width=1, dash="dot"))
+
+        fig.update_xaxes(tickformat="$,.0f", gridcolor="#D3D1C7",
+                         tickfont=dict(size=9, color="#888780"),
+                         row=row, col=col)
+        fig.update_yaxes(tickformat=fmt, gridcolor="#D3D1C7",
+                         tickfont=dict(size=9, color="#888780"),
+                         zeroline=True, zerolinecolor="#B4B2A9",
+                         row=row, col=col)
+
+    summ = strat.summary()
+    ann = (
+        f"<b>{strat.name}  —  {strat.opt.symbol}</b><br>"
+        f"Spot: ${spot:,.2f}<br>"
+        f"Δ={summ['delta']:+.3f}  "
+        f"Γ={summ['gamma']:+.5f}  "
+        f"Θ={summ['theta']:+.4f}/day  "
+        f"V={summ['vega']:+.4f}"
+    )
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.01, y=1.04,
+        text=ann, showarrow=False, align="left",
+        font=dict(size=10, color="#5F5E5A"),
+        bgcolor="rgba(255,255,255,0.90)",
+        bordercolor="#D3D1C7", borderwidth=0.5, borderpad=8,
+    )
+
+    _apply_layout(
+        fig,
+        title=f"{strat.opt.symbol} — {strat.name} — Greeks Profile",
+        subtitle=f"spot ${spot:,.2f}  ·  ±20% price range  ·  B-S model",
+    )
+    fig.update_layout(height=600)
+    return fig
