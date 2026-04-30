@@ -1,0 +1,17 @@
+{
+  "name": "Watchlist",
+  "tickers": {
+    "INTC": {
+      "symbol": "INTC",
+      "notes": "short calls position",
+      "tags": [],
+      "added_at": "2026-04-30"
+    },
+    "SPY": {
+      "symbol": "SPY",
+      "notes": "hedge",
+      "tags": [],
+      "added_at": "2026-04-30"
+    }
+  }
+}

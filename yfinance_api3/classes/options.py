@@ -526,7 +526,7 @@ class OptionsAnalyzer:
         Returns
         -------
         Full chain DataFrame with added columns:
-          delta, gamma, theta, vega, greeks_source ("yfinance" | "black_scholes")
+          delta, gamma, theta, vega, greek_source ("yfinance" | "black_scholes")
 
         Example
         -------
@@ -597,7 +597,7 @@ class OptionsAnalyzer:
         df["gamma"]         = gammas
         df["theta"]         = thetas
         df["vega"]          = vegas
-        df["greeks_source"] = sources
+        df["greek_source"] = sources
         return df
 
     # ------------------------------------------------------------------

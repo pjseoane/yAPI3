@@ -1,0 +1,11 @@
+{
+  "name": "My portfolio",
+  "created_at": "2026-04-30T14:48:31.789694",
+  "updated_at": "2026-04-30T14:48:31.802016",
+  "book_paths": {
+    "INTC": "positions/INTC.json"
+  },
+  "symbols": [
+    "INTC"
+  ]
+}
