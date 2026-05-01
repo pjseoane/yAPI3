@@ -9,11 +9,11 @@
   "lot_size": 100,
   "currency": "USD",
   "closed_pnl": 0.0,
-  "created_at": "2026-05-01T09:24:26.689861",
-  "updated_at": "2026-05-01T09:24:26.713640",
+  "created_at": "2026-05-01T11:43:12.349020",
+  "updated_at": "2026-05-01T11:43:12.372029",
   "option_legs": [
     {
-      "leg_id": "986deed2",
+      "leg_id": "fe4d9ad0",
       "option_type": "call",
       "expiry": "2026-12-18",
       "strike": 85,
@@ -28,7 +28,7 @@
       "notes": ""
     },
     {
-      "leg_id": "cfe818c7",
+      "leg_id": "eb2dee70",
       "option_type": "call",
       "expiry": "2026-12-18",
       "strike": 90,
@@ -43,7 +43,7 @@
       "notes": ""
     },
     {
-      "leg_id": "b4494920",
+      "leg_id": "5e77083a",
       "option_type": "call",
       "expiry": "2026-01-30",
       "strike": 40,
@@ -58,7 +58,7 @@
       "notes": ""
     },
     {
-      "leg_id": "66e32016",
+      "leg_id": "89c77cb4",
       "option_type": "call",
       "expiry": "2026-06-18",
       "strike": 40,
@@ -73,7 +73,7 @@
       "notes": ""
     },
     {
-      "leg_id": "44a124d5",
+      "leg_id": "bd5053a6",
       "option_type": "call",
       "expiry": "2026-06-18",
       "strike": 50,
@@ -88,7 +88,7 @@
       "notes": ""
     },
     {
-      "leg_id": "eab1e4d2",
+      "leg_id": "c1c0a1a0",
       "option_type": "call",
       "expiry": "2026-01-30",
       "strike": 37,

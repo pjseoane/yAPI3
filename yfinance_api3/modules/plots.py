@@ -5103,12 +5103,26 @@ def portfolio_summary(portfolio, days_ahead: int = 0) -> go.Figure:
                            xref="paper", yref="paper", x=0.5, y=0.5)
         return fig
 
+    data_rows = summ_df[summ_df["symbol"] != "TOTAL"]
+    has_greeks = not data_rows.empty
+
+    if not has_greeks:
+        rows = 1
+        heights = [1.0]
+        specs = [[{"type": "table"}]]
+        titles = ["Portfolio summary"]
+    else:
+        rows = 2
+        heights = [0.45, 0.55]
+        specs = [[{"type": "table"}], [{"type": "xy"}]]
+        titles = ["Portfolio summary", "Greeks by ticker"]
+
     fig = make_subplots(
-        rows=2, cols=1,
-        row_heights=[0.45, 0.55],
-        vertical_spacing=0.08,
-        specs=[[{"type": "table"}], [{"type": "xy"}]],
-        subplot_titles=["Portfolio summary", "Greeks by ticker"],
+        rows=rows, cols=1,
+        row_heights=heights,
+        vertical_spacing=0.08 if rows > 1 else 0,
+        specs=specs,
+        subplot_titles=titles,
     )
 
     # ── Table ─────────────────────────────────────────────────────────────
@@ -5157,42 +5171,42 @@ def portfolio_summary(portfolio, days_ahead: int = 0) -> go.Figure:
     ), row=1, col=1)
 
     # ── Greeks bar chart ──────────────────────────────────────────────────
-    data_rows = summ_df[summ_df["symbol"] != "TOTAL"]
-    greeks    = ["delta", "gamma", "vega", "theta", "rho"]
-    colors    = ["#378ADD", "#1D9E75", "#BA7517", "#E24B4A", "#9B59B6"]
+    if has_greeks:
+        greeks    = ["delta", "gamma", "vega", "theta", "rho"]
+        colors    = ["#378ADD", "#1D9E75", "#BA7517", "#E24B4A", "#9B59B6"]
 
-    for greek, color in zip(greeks, colors):
-        if greek not in data_rows.columns:
-            continue
-        vals = pd.to_numeric(data_rows[greek], errors="coerce").fillna(0)
-        fig.add_trace(go.Bar(
-            x=data_rows["symbol"],
-            y=vals,
-            name=greek.capitalize(),
-            marker_color=color,
-            marker_line_width=0,
-            opacity=0.8,
-            hovertemplate=f"{greek.capitalize()}: %{{y:,.4f}}<extra>%{{x}}</extra>",
-        ), row=2, col=1)
+        for greek, color in zip(greeks, colors):
+            if greek not in data_rows.columns:
+                continue
+            vals = pd.to_numeric(data_rows[greek], errors="coerce").fillna(0)
+            fig.add_trace(go.Bar(
+                x=data_rows["symbol"],
+                y=vals,
+                name=greek.capitalize(),
+                marker_color=color,
+                marker_line_width=0,
+                opacity=0.8,
+                hovertemplate=f"{greek.capitalize()}: %{{y:,.4f}}<extra>%{{x}}</extra>",
+            ), row=2, col=1)
 
-    # add_hline with row= crashes on Table traces — use add_shape with axis ref
-    fig.add_shape(type="line", xref="x2 domain", yref="y2",
-                  x0=0, x1=1, y0=0, y1=0,
-                  line=dict(color="#B4B2A9", width=0.8))
+        # add_hline with row= crashes on Table traces — use add_shape with axis ref
+        fig.add_shape(type="line", xref="x2 domain", yref="y2",
+                      x0=0, x1=1, y0=0, y1=0,
+                      line=dict(color="#B4B2A9", width=0.8))
 
-    fig.update_xaxes(tickfont=dict(size=11, color="#2C2C2A"),
-                     row=2, col=1)
-    fig.update_yaxes(title_text="Greeks", gridcolor="#D3D1C7",
-                     tickfont=dict(size=10, color="#888780"),
-                     zeroline=True, zerolinecolor="#B4B2A9",
-                     row=2, col=1)
+        fig.update_xaxes(tickfont=dict(size=11, color="#2C2C2A"),
+                         row=2, col=1)
+        fig.update_yaxes(title_text="Greeks", gridcolor="#D3D1C7",
+                         tickfont=dict(size=10, color="#888780"),
+                         zeroline=True, zerolinecolor="#B4B2A9",
+                         row=2, col=1)
 
     total_pnl = summ_df[summ_df["symbol"] == "TOTAL"]["expected_pnl"].values
     total_str = f"${float(total_pnl[0]):,.2f}" if len(total_pnl) else "—"
 
     # do NOT use _apply_layout — Table traces don't support xaxis
     fig.update_layout(
-        height=560,
+        height=560 if rows > 1 else 300,
         paper_bgcolor="#F4F3EF",
         plot_bgcolor="#FAFAF9",
         font=dict(family="'Inter', monospace", size=11, color="#2C2C2A"),
