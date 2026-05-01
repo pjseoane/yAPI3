@@ -273,7 +273,7 @@ def risk_parity(
 
     def _weights_from_y(y: np.ndarray) -> np.ndarray:
         """Map unconstrained y -> valid portfolio weights."""
-        w = y ** 2
+        w: np.ndarray = y ** 2
         return w / w.sum()
 
     def objective(y: np.ndarray) -> float:
@@ -296,6 +296,10 @@ def risk_parity(
         )
         if best_result is None or res.fun < best_result.fun:
             best_result = res
+
+    if best_result is None or not best_result.success:
+        message = "no optimizer result" if best_result is None else best_result.message
+        raise RuntimeError(f"Risk parity optimisation failed: {message}")
 
     weights = _weights_from_y(best_result.x)
     weights = np.clip(weights, 0, None)

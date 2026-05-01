@@ -264,16 +264,16 @@ def simulate(
     # --- weights ---------------------------------------------------------
     n = len(symbols)
     if weights is None:
-        weights = np.full(n, 1.0 / n)
+        weights_arr = np.full(n, 1.0 / n)
     else:
-        weights = np.array(weights, dtype=float)
-        weights = weights / weights.sum()
+        weights_arr = np.array(weights, dtype=float)
+        weights_arr = weights_arr / weights_arr.sum()
 
     # --- fetch historical returns ----------------------------------------
     ret_df = quant.returns_df(symbols, period=period, method="simple").dropna()
 
     # daily portfolio returns from history (for historical method + stats)
-    port_hist = (ret_df * weights).sum(axis=1)
+    port_hist = (ret_df * weights_arr).sum(axis=1)
 
     # per-asset stats (for parametric methods)
     mean_daily = ret_df.mean().values
@@ -286,11 +286,11 @@ def simulate(
         )
     elif method == "normal":
         daily_sims = _simulate_normal(
-            mean_daily, cov_daily, weights, horizon, n_sims, rng
+            mean_daily, cov_daily, weights_arr, horizon, n_sims, rng
         )
     elif method == "t_dist":
         daily_sims = _simulate_t(
-            mean_daily, cov_daily, weights, horizon, n_sims, df_t, rng
+            mean_daily, cov_daily, weights_arr, horizon, n_sims, df_t, rng
         )
     else:
         raise ValueError(
@@ -308,7 +308,7 @@ def simulate(
         final_values=final_values,
         metrics=metrics,
         symbols=symbols,
-        weights=weights,
+        weights=weights_arr,
         initial_value=initial_value,
         horizon=horizon,
         n_sims=n_sims,

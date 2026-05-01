@@ -41,6 +41,7 @@ from typing import Any
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
+from yfinance_api3.modules.factors import FactorModel
 
 
 # ---------------------------------------------------------------------------
@@ -584,7 +585,7 @@ def auto_report(
     mc_horizon: int = 252,
     mc_sims: int = 1000,
     include_factors: bool = True,
-    factor_model: str = "ff5",
+    factor_model: FactorModel = "ff5",
 ) -> QuantReport:
     """
     Build a full report automatically from symbols.

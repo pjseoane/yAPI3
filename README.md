@@ -10,6 +10,8 @@ Reusable quantitative finance library built around `yfinance`.
 
 ## Install
 
+This project targets Python 3.14+.
+
 For local development:
 
 ```powershell

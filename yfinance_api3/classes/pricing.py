@@ -24,9 +24,8 @@ Conventions
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from enum import Enum
-from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -92,7 +91,7 @@ class UnderlyingData:
     dividendYield:   float        = 0.0
     riskFreeRate:    float        = 3.5
     contractType:    ContractType = ContractType.STOCK
-    name:            str          = None
+    name:            str | None   = None
     ticker:          str          = "Ticker"
     exchange:        str          = "exchange"
     currency:        str          = "USD"
@@ -162,7 +161,7 @@ class OptionData:
     lots:        float       = 0.0
     price:       float       = 0.0
     lot_size:    float       = 100.0
-    expiry_date: str         = None   # YYYY-MM-DD — set by PositionsBook
+    expiry_date: str | None  = None   # YYYY-MM-DD — set by PositionsBook
 
 
 # ---------------------------------------------------------------------------
@@ -627,11 +626,6 @@ class BaroneAdesiWhaley(OptionModel):
     def get_model_outputs_range(self, space: Space) -> pd.DataFrame:
         """Vectorized BAW across price range."""
         K      = self.optionObj.strike
-        T      = self.optionObj.life_days / 365.0
-        sigma  = self.underlyingObj.underlyingVlt
-        r      = self.underlyingObj.r
-        q      = self.underlyingObj.q
-        cp     = self.optionObj.option_type.value
 
         price_range = self.underlyingObj.get_underlying_range(space.days, space.dStd)
         spots = np.linspace(price_range[0], price_range[1], space.steps)
@@ -651,19 +645,6 @@ class BaroneAdesiWhaley(OptionModel):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _price(self, S, K, T, r, q, sigma, cp, q2, q1, euro_ref):
-        """BAW price for a call at spot S."""
-        opt = OptionData(strike=K, option_type=OptionType.CALL if cp==1 else OptionType.PUT,
-                         life_days=T*365, lots=self.optionObj.lots,
-                         price=self.optionObj.price, lot_size=self.optionObj.lot_size)
-        und = UnderlyingData(underlyingValue=S, underlyingVlt=sigma,
-                             dividendYield=q*100, riskFreeRate=r*100,
-                             contractType=self.underlyingObj.contractType)
-        return BaroneAdesiWhaley(opt, und).get_model_outputs()["prima"]
-
-    def _price_put(self, S, K, T, r, q, sigma, q1, euro_ref):
-        return self._price(S, K, T, r, q, sigma, -1, None, q1, euro_ref)
 
     @staticmethod
     def _critical_price_call(K, T, r, q, sigma, q2, euro_price_at_star=None,
@@ -803,7 +784,7 @@ class PricingStrategy:
     Note: renamed from Strategy → PricingStrategy to avoid conflict
     with OptionsStrategy in options_strategy.py.
     """
-    engines: list = None
+    engines: list | None = None
 
     def get_strategy_totals(self, space: Space) -> pd.DataFrame:
         """Sum P&L and Greeks across all legs."""
@@ -824,7 +805,10 @@ class PricingStrategy:
 
     def get_spot_greeks(self) -> dict:
         """Greeks at current spot for all legs combined."""
-        totals = {}
+        if not self.engines:
+            return {}
+
+        totals: dict[str, float] = {}
         for e in self.engines:
             out = e.get_model_outputs()
             lots   = e.model.optionObj.lots

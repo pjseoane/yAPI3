@@ -281,7 +281,7 @@ class ETFConcentration:
         self.ticker      = ticker.upper()
         self._client     = client
         self._weights_df: pd.DataFrame | None = None
-        self._provider   = None
+        self._provider: str | None = None
 
     # ------------------------------------------------------------------
 
@@ -322,16 +322,13 @@ class ETFConcentration:
     # ------------------------------------------------------------------
 
     def weights(self) -> pd.DataFrame:
-        self._check_fetched()
-        return self._weights_df.copy()
+        return self._fetched_weights().copy()
 
     def top_n(self, n: int = 10) -> pd.DataFrame:
-        self._check_fetched()
-        return self._weights_df.head(n).copy()
+        return self._fetched_weights().head(n).copy()
 
     def concentration_metrics(self, top_ns: list[int] | None = None) -> dict:
-        self._check_fetched()
-        df      = self._weights_df
+        df      = self._fetched_weights()
         weights = df["weight"].values
         n       = len(weights)
 
@@ -373,9 +370,9 @@ class ETFConcentration:
         }
 
     def sector_weights(self) -> pd.DataFrame:
-        self._check_fetched()
+        df = self._fetched_weights()
         return (
-            self._weights_df
+            df
             .groupby("sector")
             .agg(
                 weight=("weight", "sum"),
@@ -387,8 +384,7 @@ class ETFConcentration:
         )
 
     def cumulative_weight(self) -> pd.Series:
-        self._check_fetched()
-        return self._weights_df["weight"].cumsum().rename("cumulative_weight")
+        return self._fetched_weights()["weight"].cumsum().rename("cumulative_weight")
 
     def holdings_for_pct(self, target_pct: float = 0.50) -> int:
         self._check_fetched()
@@ -418,10 +414,14 @@ class ETFConcentration:
         spy.holdings_table().head(20)
         spy.holdings_table()[spy.holdings_table()["cumulative_weight_pct"] <= 50]
         """
-        self._check_fetched()
-        df = self._weights_df.copy()
+        df = self._fetched_weights().copy()
         df["cumulative_weight_pct"] = df["weight"].cumsum() * 100
         return df[["symbol", "name", "weight_pct", "cumulative_weight_pct"]]
+
+    def _fetched_weights(self) -> pd.DataFrame:
+        self._check_fetched()
+        assert self._weights_df is not None
+        return self._weights_df
 
     def _check_fetched(self) -> None:
         if self._weights_df is None:

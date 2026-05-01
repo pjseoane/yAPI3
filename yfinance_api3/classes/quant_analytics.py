@@ -384,10 +384,10 @@ class QuantAnalytics:
 
         weights must sum to 1.0.
         """
-        weights = np.array(weights)
-        assert abs(weights.sum() - 1.0) < 1e-6, "Weights must sum to 1"
+        weights_arr = np.array(weights)
+        assert abs(weights_arr.sum() - 1.0) < 1e-6, "Weights must sum to 1"
         rets = self.returns_bulk(symbols, period).mean()
-        return float((rets @ weights) * self.trading_days)
+        return float((rets @ weights_arr) * self.trading_days)
 
     def portfolio_volatility(
         self,
@@ -396,9 +396,9 @@ class QuantAnalytics:
         period: str = "1y",
     ) -> float:
         """Annualised portfolio volatility given weights."""
-        weights = np.array(weights)
+        weights_arr = np.array(weights)
         cov = self.covariance_matrix(symbols, period)
-        variance = weights @ cov.values @ weights
+        variance = weights_arr @ cov.values @ weights_arr
         return float(np.sqrt(variance))
 
     def portfolio_sharpe(
@@ -1538,4 +1538,3 @@ class QuantAnalytics:
         combined.index = combined.index + 1
         combined.index.name = "rank"
         return combined
-

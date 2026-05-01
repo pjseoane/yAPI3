@@ -7,13 +7,11 @@ name = "yfinance_api3"
 version = "0.1.0"
 description = "Reusable quantitative finance engine"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 authors = [{ name = "Paulino" }]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
 ]
 dependencies = [
@@ -46,6 +44,7 @@ dev = [
     "black",
     "ruff",
     "mypy",
+    "types-requests",
     "build",
 ]
 
@@ -53,6 +52,7 @@ dev = [
 include = ["yfinance_api3*"]
 
 [tool.ruff]
+target-version = "py314"
 exclude = [
     ".git",
     ".idea",

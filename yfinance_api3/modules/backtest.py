@@ -200,7 +200,7 @@ def run(
     strategy_name        : display name (inferred from strategy if not set)
     """
     cost_rate = transaction_cost_bps / 10_000.0
-    name      = strategy_name or getattr(strategy, "__name__", "Strategy")
+    name      = str(strategy_name or getattr(strategy, "__name__", "Strategy"))
 
     # --- fetch prices ----------------------------------------------------
     prices = quant._prices_bulk(symbols, period=period)

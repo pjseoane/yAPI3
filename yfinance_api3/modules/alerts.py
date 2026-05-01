@@ -322,6 +322,8 @@ class AlertEngine:
             self._send_webhook(result)
 
     def _log_to_file(self, result: AlertResult) -> None:
+        if not self._log_path:
+            return
         try:
             with open(self._log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(result.to_dict()) + "\n")
@@ -330,6 +332,8 @@ class AlertEngine:
 
     def _send_email(self, result: AlertResult) -> None:
         cfg  = self._email_cfg
+        if not cfg:
+            return
         body = str(result)
         msg  = MIMEText(body)
         msg["Subject"] = f"[Alert] {result.alert_name} — {result.symbol}"
@@ -345,6 +349,8 @@ class AlertEngine:
             logger.warning(f"Failed to send email alert: {e}")
 
     def _send_webhook(self, result: AlertResult) -> None:
+        if not self._webhook_url:
+            return
         try:
             payload = {
                 "text": str(result),

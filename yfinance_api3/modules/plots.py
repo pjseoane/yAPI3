@@ -24,6 +24,8 @@ Positions  : positions_book, portfolio_summary
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -95,10 +97,6 @@ def _apply_layout(fig: go.Figure, title: str, subtitle: str = "") -> go.Figure:
         title=dict(text=full_title, font=dict(size=15, color="#2C2C2A"), x=0.02),
     )
     return fig
-
-
-def _pct_fmt(val: float) -> str:
-    return f"{val * 100:.1f}%"
 
 
 def _period_label(period: str) -> str:
@@ -1699,9 +1697,7 @@ def seasonality_comparison(
     current_year = datetime.date.today().year
 
     periods_to_plot = [long_term, short_term] + (extra_periods or [])
-    seen = set()
-    periods_to_plot = [p for p in periods_to_plot
-                       if not (p in seen or seen.add(p))]
+    periods_to_plot = list(dict.fromkeys(periods_to_plot))
 
     # ── helper: per-year cumret pivot ──────────────────────────────────────
     def _get_hist(period: str):
@@ -1835,8 +1831,7 @@ def seasonality_comparison(
         cy_now    = float(y_cy[-1])
         ann_lines = [f"<b>{current_year} at W{last_week:02d}: {cy_now:+.2%}</b>"]
         for period, avg_dict in hist_avgs.items():
-            hist_now = avg_dict.get(last_week,
-                       avg_dict.get(max(avg_dict.keys()), 0))
+            hist_now = float(avg_dict.get(last_week, avg_dict.get(max(avg_dict.keys()), 0.0)) or 0.0)
             diff     = cy_now - hist_now
             arrow    = "▲" if diff >= 0 else "▼"
             clr      = "#0F6E56" if diff >= 0 else "#A32D2D"
@@ -1930,9 +1925,7 @@ def seasonality_comparison_clean(
 
     # deduplicated list of periods to plot
     periods_to_plot = [long_term, short_term] + (extra_periods or [])
-    seen = set()
-    periods_to_plot = [p for p in periods_to_plot
-                       if not (p in seen or seen.add(p))]
+    periods_to_plot = list(dict.fromkeys(periods_to_plot))
 
     # ── helper: average cumulative return curve for a period ─────────────
     def _avg_cumret(period: str) -> pd.Series:
@@ -2070,7 +2063,7 @@ def seasonality_comparison_clean(
         cy_now    = float(y_cy[-1])
         ann_lines = [f"<b>{current_year} at W{last_week:02d}: {cy_now:+.2%}</b>"]
         for period, avg_dict in hist_avgs.items():
-            hist_now = avg_dict.get(last_week, avg_dict.get(max(avg_dict.keys())))
+            hist_now = float(avg_dict.get(last_week, avg_dict.get(max(avg_dict.keys()), 0.0)) or 0.0)
             diff     = cy_now - hist_now
             arrow    = "▲" if diff >= 0 else "▼"
             clr      = "#0F6E56" if diff >= 0 else "#A32D2D"
@@ -2138,6 +2131,8 @@ def factor_exposure(result, show_significance: bool = True) -> go.Figure:
     result             : FactorResult from factors.run()
     show_significance  : annotate bars with * / ** / *** significance stars
     """
+    from yfinance_api3.modules.factors import _FACTOR_LABELS
+
     factors  = list(result.betas.keys())
     betas    = [result.betas[f] for f in factors]
     t_stats  = [result.t_stats[f] for f in factors]
@@ -2660,7 +2655,7 @@ def seasonality_box(
         ),
     )
     fig.update_layout(
-        height=750,
+        height=560,
         boxmode="group",
         boxgap=0.3,
         boxgroupgap=0.1,
@@ -2888,7 +2883,6 @@ def sp500_concentration(sp, top_n: int = 50) -> go.Figure:
     sp    : ETFConcentration instance (already fetched)
     top_n : number of holdings to show in the top bar (default 50)
     """
-    from yfinance_api3.modules.etf import ETFConcentration
 
     df      = sp.weights()
     top_df  = sp.top_n(top_n)
@@ -2925,7 +2919,6 @@ def sp500_concentration(sp, top_n: int = 50) -> go.Figure:
                   for s in top_df["sector"].fillna("Unknown")]
 
     # weight labels only on top 10 where bars are tall enough
-    top10_mask = list(range(len(top_df)))
     bar_text   = [f"{v:.1f}%" if i < 10 else ""
                   for i, v in enumerate(top_df["weight_pct"])]
 
@@ -2980,7 +2973,7 @@ def sp500_concentration(sp, top_n: int = 50) -> go.Figure:
         mode="lines",
         line=dict(color=_PALETTE[0], width=2.5),
         fill="tozeroy",
-        fillcolor=f"rgba(55,138,221,0.08)",
+        fillcolor="rgba(55,138,221,0.08)",
         showlegend=False,
         hovertemplate="Top %{x} holdings<br>Cumulative: %{y:.1f}%<extra></extra>",
     ), row=2, col=1)
@@ -3071,7 +3064,7 @@ def sp500_concentration(sp, top_n: int = 50) -> go.Figure:
 
     fig.add_trace(go.Table(
         header=dict(
-            values=[f"<b>{l}</b>" for l in kpi_labels],
+            values=[f"<b>{label}</b>" for label in kpi_labels],
             fill_color="#F4F3EF",
             font=dict(size=11, color="#888780"),
             align="center",
@@ -3499,7 +3492,6 @@ def options_chain(
     opt    : OptionsAnalyzer instance
     expiry : expiration date string (default = front month)
     """
-    from yfinance_api3.classes.options import OptionsAnalyzer
 
     if expiry is None:
         expiry = opt.nearest_expiry(0)
@@ -4110,7 +4102,6 @@ def options_gex(
                    they buy rallies and sell dips → high realised vol
     GEX flip     : the strike/level where GEX crosses zero — key threshold
     """
-    from datetime import date
 
     spot     = opt._get_spot()
     total    = opt.gex_total(max_expiries, risk_free_rate)
@@ -4237,14 +4228,13 @@ def options_gex(
                      tickfont=dict(size=10, color="#888780"), row=3, col=1)
 
     # regime annotation
-    regime_label = total.get("regime_label", "")
-    flips        = total.get("gex_flip_strikes", [])
+    flip_str   = f"${total['flip_strike']:,.0f}" if total.get("flip_strike") else "none"
+    regime_lbl = "LONG" if grand_total > 0 else "SHORT"
+    regime_ico = "🟢" if grand_total > 0 else "🔴"
     ann = (
-        f"<b style='color:{regime_color}'>"
-        f"{'🟢' if grand_total > 0 else '🔴'} "
-        f"{'LONG' if grand_total > 0 else 'SHORT'} GAMMA REGIME</b><br>"
+        f"<b style='color:{regime_color}'>{regime_ico} {regime_lbl} GAMMA REGIME</b><br>"
         f"Grand Total GEX: ${grand_total/1e6:+.1f}M<br>"
-        f"GEX flip: {'$' + f'{total["flip_strike"]:,.0f}' if total.get('flip_strike') else 'none'}<br>"
+        f"GEX flip: {flip_str}<br>"
         f"Dominant expiry: {total.get('dominant_expiry', '—')}"
     )
     fig.add_annotation(
@@ -4677,9 +4667,9 @@ def strategy_surface(strat, n_spots: int = 60, n_days: int = 20) -> go.Figure:
         fig,
         title=f"{strat.opt.symbol} — {strat.name} — P&L Surface",
         subtitle=(
-            f"x-axis = underlying price  ·  "
-            f"y-axis = days until front expiry  ·  "
-            f"green = profit  ·  red = loss"
+            "x-axis = underlying price  ·  "
+            "y-axis = days until front expiry  ·  "
+            "green = profit  ·  red = loss"
         ),
     )
     fig.update_xaxes(title_text="Underlying price ($)", tickformat="$,.0f",
@@ -4795,514 +4785,304 @@ def positions_book(
     show_norm_dist: bool = True,
 ) -> go.Figure:
     """
-    Positions dashboard — dark theme matching the reference sheet layout.
-
-    Single figure with:
-      - P&L curves (PL Today, PL Vcto, Norm Dist, Hoy marker)
-      - Summary table on the right
-      - Header strip at the bottom
-    Price range: ±3 standard deviations from spot (lognormal)
+    P&L chart for one underlying. Clean dark theme.
+    Build up: chart → summary table → parameter strip.
     """
     import math
     from yfinance_api3.classes.pricing import Space as PricingSpace
 
-    # ── price range: ±3 std devs (lognormal) ─────────────────────────────
-    # use 1-year horizon for range regardless of DTE — keeps chart readable
-    sigma = book.vol
-    spot  = book.spot
-    T_range = min(max(
-        max((pd.to_datetime(l.expiry).date() -
-             pd.Timestamp.today().date()).days
-            for l in book.option_legs if l.status == "open"),
-        30) / 365.0, 1.0) if book.option_legs else 0.25
-    lo = spot * math.exp(-3 * sigma * math.sqrt(T_range))
-    hi = spot * math.exp( 3 * sigma * math.sqrt(T_range))
-    T  = T_range
-
-    # space drives price range, payoff calculation, and x-axis display
-    space = PricingSpace(dStd=d_std, days=max(days_ahead, 1), steps=steps)
-
+    space  = PricingSpace(dStd=d_std, days=max(days_ahead, 1), steps=steps)
     summ   = book.summary(days_ahead=days_ahead)
-    gt     = book.greeks_table(days_ahead=days_ahead)
     curves = book.payoff_curves(days_ahead=days_ahead, space=space)
-    model_date = summ.get("model_date", "—")
+    spot   = book.spot
 
-    # ── colour palette (dark theme) ───────────────────────────────────────
-    BG      = "#1a1a1a"
-    PANEL   = "#111111"
-    ORANGE  = "#FF8C00"
-    GREEN   = "#39FF14"
-    RED     = "#FF4136"
-    YELLOW  = "#FFD700"
-    MUTED   = "#888888"
-    WHITE   = "#FFFFFF"
+    BG = "#1a1a1a"
+    PANEL = "#111111"
+    ORANGE = "#FF8C00"
+    GREEN = "#39FF14"
+    RED = "#FF4136"
+    YELLOW = "#FFD700"
+    MUTED = "#888888"
+    WHITE = "#FFFFFF"
 
     fig = go.Figure()
 
-    # ── P&L curves ────────────────────────────────────────────────────────
     if not curves.empty:
         x = curves["underlyingValue"]
 
         # PL Vcto
         fig.add_trace(go.Scatter(
-            x=x, y=curves["P&L Vcto"],
-            mode="lines", name="PL Vcto",
+            x=x, y=curves["P&L Vcto"], mode="lines", name="PL Vcto",
             line=dict(color=RED, width=3),
-            xaxis="x", yaxis="y",
             hovertemplate="$%{x:,.2f}<br>PL Vcto: $%{y:,.0f}<extra></extra>",
         ))
 
-        # PL Hoy / +Nd
-        label_today = f"PL +{days_ahead}d" if days_ahead > 0 else "PL Today"
+        # PL Today / +Nd
+        label = f"PL +{days_ahead}d" if days_ahead > 0 else "PL Today"
         fig.add_trace(go.Scatter(
-            x=x, y=curves["P&L Hoy"],
-            mode="lines", name=label_today,
+            x=x, y=curves["P&L Hoy"], mode="lines", name=label,
             line=dict(color=GREEN, width=2, dash="dash"),
-            xaxis="x", yaxis="y",
-            hovertemplate=f"$%{{x:,.2f}}<br>{label_today}: $%{{y:,.0f}}<extra></extra>",
+            hovertemplate=f"$%{{x:,.2f}}<br>{label}: $%{{y:,.0f}}<extra></extra>",
         ))
 
-        # Normal distribution overlay — centred on spot, covers full chart range
+        # Norm Dist
         if show_norm_dist:
-            nx      = x.values
-            x_lo    = float(nx.min())
-            x_hi    = float(nx.max())
-            # sigma fitted so bell reaches ~near zero at chart edges
-            # width = (x_hi - x_lo) / (2 * d_std) makes it span full range
-            s_norm  = (x_hi - x_lo) / (2 * d_std)
-            ny      = np.array([
-                math.exp(-0.5 * ((xi - spot) / s_norm) ** 2)
-                for xi in nx
-            ])  # un-normalized — peak = 1.0 at spot
-            # scale to 80% of visible P&L range, bottom anchored at chart min
-            pnl_min   = float(curves[["P&L Hoy","P&L Vcto"]].min().min())
-            pnl_max   = float(curves[["P&L Hoy","P&L Vcto"]].max().max())
-            pnl_rng   = pnl_max - pnl_min
-            ny_scaled = ny * pnl_rng * 0.80 + pnl_min
+            nx   = x.values
+            s_n  = (float(nx.max()) - float(nx.min())) / (2 * d_std)
+            ny   = np.array([math.exp(-0.5*((xi-spot)/s_n)**2) for xi in nx])
+            pmin = float(curves[["P&L Hoy","P&L Vcto"]].min().min())
+            pmax = float(curves[["P&L Hoy","P&L Vcto"]].max().max())
             fig.add_trace(go.Scatter(
-                x=nx, y=ny_scaled,
+                x=nx, y=ny*(pmax-pmin)*0.8+pmin,
                 mode="lines", name="Norm Dist",
                 line=dict(color=YELLOW, width=1.5, dash="dot"),
-                xaxis="x", yaxis="y", hoverinfo="skip",
+                hoverinfo="skip",
             ))
 
-        # Hoy marker — diamond at current spot
-        hoy_pnl = float(np.interp(spot, x.values, curves["P&L Hoy"].values))
+        # Hoy marker
+        hoy_y = float(np.interp(spot, x.values, curves["P&L Hoy"].values))
         fig.add_trace(go.Scatter(
-            x=[spot], y=[hoy_pnl],
-            mode="markers", name="Hoy",
-            marker=dict(symbol="diamond", size=14,
-                        color=GREEN, line=dict(color=WHITE, width=1.5)),
-            xaxis="x", yaxis="y",
-            hovertemplate=f"Hoy ${spot:,.2f}<br>P&L: ${hoy_pnl:,.0f}<extra></extra>",
+            x=[spot], y=[hoy_y], mode="markers", name="Hoy",
+            marker=dict(symbol="diamond", size=14, color=GREEN,
+                        line=dict(color=WHITE, width=1.5)),
+            hovertemplate=f"Hoy ${spot:,.2f}<br>${hoy_y:,.0f}<extra></extra>",
         ))
 
-        # zero line
-        fig.add_shape(type="line",
-                      xref="x domain", yref="y",
-                      x0=0, x1=1, y0=0, y1=0,
-                      line=dict(color=MUTED, width=0.8, dash="dash"))
+        # zero line + spot line
+        fig.add_hline(y=0, line=dict(color=MUTED, width=0.8, dash="dash"))
+        fig.add_vline(x=spot, line=dict(color="#555555", width=1, dash="dot"))
 
-        # spot vertical reference line
-        fig.add_shape(type="line",
-                      xref="x", yref="y domain",
-                      x0=spot, x1=spot, y0=0, y1=1,
-                      line=dict(color="#555555", width=1, dash="dot"))
+        # y range — fit to data
+        ymin = float(curves[["P&L Hoy","P&L Vcto"]].min().min())
+        ymax = float(curves[["P&L Hoy","P&L Vcto"]].max().max())
+        ypad = (ymax-ymin)*0.06
 
-    # ── Summary table ─────────────────────────────────────────────────────
-    sum_labels = ["Closed:", "Value:", "P & L Open:", "Expected P&L:",
-                  "Delta:", "Delta exp:", "Gamma:", "Vega:", "Theta:", "Rho:"]
-    sum_raw    = [summ.get("closed_pnl",0),   summ.get("open_value",0),
-                  summ.get("open_pnl",0),      summ.get("expected_pnl",0),
-                  summ.get("delta",0),          summ.get("delta_dollars",0),
-                  summ.get("gamma",0),          summ.get("vega",0),
-                  summ.get("theta",0),          summ.get("rho",0)]
-    sum_fmts   = ["${:,.2f}","${:,.2f}","${:,.2f}","${:,.2f}",
-                  "{:,.2f}","${:,.2f}","{:,.2f}","${:,.2f}","${:,.2f}","${:,.2f}"]
-    sum_vals   = [f.format(v) if isinstance(v,(int,float)) else str(v)
-                  for f,v in zip(sum_fmts, sum_raw)]
-    sum_colors = [ORANGE if isinstance(v,(int,float)) and v>=0 else RED
-                  for v in sum_raw]
-
-    fig.add_trace(go.Table(
-        domain=dict(x=[0.65, 1.0], y=[0.14, 1.0]),
-        header=dict(
-            values=["<b>Summary</b>", ""],
-            fill_color=PANEL,
-            font=dict(color=WHITE, size=13, family="Arial"),
-            align="center", height=32,
-            line=dict(color=MUTED, width=0.5),
-        ),
-        cells=dict(
-            values=[sum_labels, sum_vals],
-            fill_color=PANEL,
-            font=dict(color=[["#AAAAAA"]*len(sum_labels), sum_colors],
-                      size=13, family="Arial"),
-            align=["right", "right"],
-            height=30,
-            line=dict(color="#333333", width=0.5),
-        ),
-    ))
-
-    # ── Legs table — one row per open option leg ─────────────────────────
-    if not gt.empty:
-        leg_rows = gt[gt["leg_id"] != "TOTAL"].copy()
-        opt_rows = leg_rows[leg_rows["leg_id"] != "UND"]
-        und_rows = leg_rows[leg_rows["leg_id"] == "UND"]
-
-        cols     = ["type","expiry","strike","iv","model","lots",
-                    "price_paid","model_price","pnl","delta","gamma","theta","rho"]
-        tbl      = opt_rows[[c for c in cols if c in opt_rows.columns]].copy()
-
-        fmt_map  = {"strike":"${:,.0f}", "price_paid":"${:,.2f}",
-                    "model_price":"${:,.3f}", "pnl":"${:,.0f}",
-                    "delta":"{:,.2f}", "gamma":"{:,.4f}",
-                    "theta":"{:,.2f}", "rho":"{:,.2f}"}
-
-        cell_vals = []
-        for col in tbl.columns:
-            col_data = []
-            for v in tbl[col]:
-                if col in fmt_map and isinstance(v,(int,float)):
-                    try: col_data.append(fmt_map[col].format(float(v)))
-                    except: col_data.append(str(v))
-                else:
-                    col_data.append(str(v) if v is not None else "")
-            cell_vals.append(col_data)
-
-        # pnl colour
-        pnl_idx = list(tbl.columns).index("pnl") if "pnl" in tbl.columns else -1
-        font_cols = []
-        for ci, col in enumerate(tbl.columns):
-            if ci == pnl_idx:
-                font_cols.append([
-                    ORANGE if isinstance(v,(int,float)) and float(v)>=0 else RED
-                    for v in tbl[col]
-                ])
-            elif col == "lots":
-                font_cols.append([
-                    ORANGE if isinstance(v,(int,float)) and float(v)<0 else GREEN
-                    for v in tbl[col]
-                ])
-            else:
-                font_cols.append([WHITE]*len(tbl))
-
-        # row fill — alternate shading
-        row_fills = []
-        for i in range(len(tbl)):
-            row_fills.append("#1E1E1E" if i%2==0 else "#252525")
+        # ── Summary table ─────────────────────────────────────────────────
+        sum_labels = ["Closed:","Value:","P & L Open:","Expected P&L:",
+                      "Delta:","Delta exp:","Gamma:","Vega:","Theta:","Rho:"]
+        sum_raw    = [summ.get("closed_pnl",0),  summ.get("open_value",0),
+                      summ.get("open_pnl",0),     summ.get("expected_pnl",0),
+                      summ.get("delta",0),         summ.get("delta_dollars",0),
+                      summ.get("gamma",0),         summ.get("vega",0),
+                      summ.get("theta",0),         summ.get("rho",0)]
+        sum_fmts   = ["${:,.2f}","${:,.2f}","${:,.2f}","${:,.2f}",
+                      "{:,.2f}","${:,.2f}","{:,.2f}","${:,.2f}","${:,.2f}","${:,.2f}"]
+        sum_vals   = [f.format(v) if isinstance(v,(int,float)) else str(v)
+                      for f,v in zip(sum_fmts, sum_raw)]
+        sum_colors = [ORANGE if isinstance(v,(int,float)) and v>=0 else RED
+                      for v in sum_raw]
 
         fig.add_trace(go.Table(
-            domain=dict(x=[0.0, 1.0], y=[0.14, 0.42]),
+            domain=dict(x=[0.67, 1.0], y=[0.0, 1.0]),
             header=dict(
-                values=[f"<b>{c.replace('_',' ').upper()}</b>" for c in tbl.columns],
-                fill_color="#8B0000",
-                font=dict(color=ORANGE, size=9, family="Arial"),
-                align="center", height=20,
-                line=dict(color="#444444", width=0.5),
+                values=["<b>Summary</b>", ""],
+                fill_color=PANEL,
+                font=dict(color=WHITE, size=13, family="Arial Bold"),
+                align="center", height=34,
+                line=dict(color=MUTED, width=0.5),
             ),
             cells=dict(
-                values=cell_vals,
-                fill_color=[row_fills]*len(tbl.columns),
-                font=dict(color=font_cols, size=10, family="Arial"),
-                align=["left"]+["center"]*(len(tbl.columns)-1),
-                height=22,
+                values=[sum_labels, sum_vals],
+                fill_color=PANEL,
+                font=dict(color=[["#AAAAAA"]*len(sum_labels), sum_colors],
+                          size=13, family="Arial"),
+                align=["right","right"],
+                height=32,
                 line=dict(color="#333333", width=0.5),
             ),
         ))
 
-        # underlying position row — separate strip
-        und_text = ""
-        und_pnl_text = ""
-        for _, ur in und_rows.iterrows():
-            sign = "Long" if float(ur.get("lots",0)) > 0 else "Short"
-            und_text = f"Underlying position:  {sign} {abs(float(ur.get('lots',0))):,.0f} @ ${float(ur.get('strike',0)):,.2f}"
-            und_pnl  = float(ur.get("pnl",0))
-            und_pnl_text = f"P&L: {'${:,.2f}'.format(und_pnl)}"
-
-        if und_text:
-            fig.add_trace(go.Table(
-                domain=dict(x=[0.0, 1.0], y=[0.12, 0.15]),
-                header=dict(values=[], fill_color="rgba(0,0,0,0)",
-                            height=0, line=dict(width=0)),
-                cells=dict(
-                    values=[[und_text], [und_pnl_text]],
-                    fill_color="#1a1a1a",
-                    font=dict(color=[ORANGE, ORANGE if float(und_rows["pnl"].iloc[0])>=0 else RED],
-                              size=11, family="Arial Bold"),
-                    align=["right","left"],
-                    height=22,
-                    line=dict(color="#333333", width=0.5),
-                ),
-            ))
-
-    # ── Header strip at bottom — model parameters ────────────────────────
-    has_american = any(l.instrument == "american"
-                       for l in book.option_legs if l.status == "open")
-    hdr_labels = ["D Std", "Contract", "Type",    "Vol",
-                  "Risk Free", "+Days",  "American", "Lot Size"]
-    hdr_vals   = [
-        f"{d_std:.1f}",
-        book.contract_type.value,
-        book.contract_type.name.capitalize(),
-        f"{book.vol:.1%}",
-        f"{book.risk_free_rate:.2f}%",
-        str(days_ahead),
-        "YES" if has_american else "NO",
-        f"{book.lot_size:.0f}",
-    ]
-    hdr_val_colors = [WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
-                      YELLOW if has_american else WHITE, WHITE]
-
-    fig.add_trace(go.Table(
-        domain=dict(x=[0.0, 1.0], y=[0.0, 0.10]),
-        header=dict(
-            values=[f"<b>{l}</b>" for l in hdr_labels],
-            fill_color="#8B0000",
-            font=dict(color="#AAAAAA", size=10, family="Arial"),
-            align="center", height=22,
-            line=dict(color="#444444", width=0.5),
-        ),
-        cells=dict(
-            values=[[v] for v in hdr_vals],
-            fill_color=RED,
-            font=dict(color=[[c] for c in hdr_val_colors],
-                      size=13, family="Arial Bold"),
-            align="center", height=28,
-            line=dict(color="#444444", width=0.5),
-        ),
-    ))
-
-    # ── layout ────────────────────────────────────────────────────────────
-    # y range — fit exactly to data, no forced zero baseline
-    if not curves.empty:
-        y_min = float(curves[["P&L Hoy","P&L Vcto"]].min().min())
-        y_max = float(curves[["P&L Hoy","P&L Vcto"]].max().max())
-        y_pad = (y_max - y_min) * 0.05
-        y_range = [y_min - y_pad, y_max + y_pad]
-    else:
-        y_range = None
-
-    fig.update_layout(
-        height=520,
-        paper_bgcolor=BG,
-        plot_bgcolor=PANEL,
-        font=dict(family="Arial", color=WHITE, size=12),
-        margin=dict(l=80, r=20, t=55, b=5),
-        legend=dict(
-            orientation="h", x=0.01, y=1.07,
-            font=dict(size=11, color=WHITE),
-            bgcolor="rgba(0,0,0,0)",
-        ),
-        title=dict(
-            text=f"<b>{book.symbol}</b>",
-            font=dict(size=20, color=ORANGE, family="Arial Bold"),
-            x=0.30, y=0.97,
-        ),
-        xaxis=dict(
-            domain=[0, 0.63], anchor="y",
-            # x domain anchored to y which starts at 0.44
-            range=[float(curves["underlyingValue"].min()),
-                   float(curves["underlyingValue"].max())] if not curves.empty else None,
-            tickformat=",.0f",
-            gridcolor="#333333", gridwidth=0.5,
-            linecolor="#555555",
-            tickfont=dict(size=11, color=WHITE),
-            showticklabels=True,
-            tickprefix="$",
-        ),
-        yaxis=dict(
-            domain=[0.44, 0.97], anchor="x",
-            range=y_range,
-            tickformat="$,.0f",
-            gridcolor="#333333", gridwidth=0.5,
-            linecolor="#555555",
-            tickfont=dict(size=10, color=MUTED),
-            zeroline=True, zerolinecolor=MUTED, zerolinewidth=0.8,
-        ),
-    )
+        fig.update_layout(
+            height=480,
+            paper_bgcolor=BG, plot_bgcolor=PANEL,
+            margin=dict(l=90, r=10, t=60, b=55),
+            font=dict(family="Arial", color=WHITE, size=12),
+            title=dict(text=f"<b>{book.symbol}</b>",
+                       font=dict(size=22, color=ORANGE, family="Arial Bold"),
+                       x=0.33, xanchor="center", y=0.97),
+            legend=dict(orientation="h", x=0.01, y=1.06,
+                        font=dict(size=11, color=WHITE),
+                        bgcolor="rgba(0,0,0,0)"),
+            xaxis=dict(
+                domain=[0.0, 0.64],
+                tickformat=",.0f", tickprefix="$",
+                tickfont=dict(size=11, color=WHITE),
+                gridcolor="#2a2a2a", linecolor="#555555",
+                showticklabels=True,
+            ),
+            yaxis=dict(
+                domain=[0.0, 1.0],
+                range=[ymin-ypad, ymax+ypad],
+                tickformat="$,.0f",
+                tickfont=dict(size=10, color=MUTED),
+                gridcolor="#2a2a2a", linecolor="#555555",
+                zeroline=True, zerolinecolor=MUTED,
+            ),
+        )
     return fig
 
 
-def positions_legs_table(book, days_ahead: int = 0) -> go.Figure:
+def positions_legs(book, days_ahead: int = 0) -> go.Figure:
     """
-    Options legs table for one PositionsBook — matches the sheet layout.
-
-    Shows one row per open option leg with model price, Greeks, and P&L.
-    Footer row shows underlying position.
-    Negative lots = short (highlighted in red background).
+    Legs table + underlying position + model parameters.
+    Height and domains computed from actual row counts.
     """
-    gt  = book.greeks_table(days_ahead=days_ahead)
+    gt   = book.greeks_table(days_ahead=days_ahead)
+    summ = book.summary(days_ahead=days_ahead)
 
-    # colours
-    HDR_BG    = "#1a1a1a"
-    HDR_FONT  = "#FF8C00"   # orange headers
-    ROW_LONG  = "#FFFFFF"
-    ROW_SHORT = "#FFF0F0"   # light red for short positions
-    ROW_UND   = "#FFF8E7"   # light amber for underlying
-    ROW_TOT   = "#F4F3EF"
-    FONT_NEG  = "#E24B4A"
-    FONT_POS  = "#1D9E75"
-    FONT_DARK = "#2C2C2A"
-    FONT_MUT  = "#888780"
+    BG = "#1a1a1a"
+    ORANGE = "#FF8C00"
+    GREEN = "#39FF14"
+    RED = "#FF4136"
+    WHITE = "#FFFFFF"
 
-    if gt.empty:
-        fig = go.Figure()
-        fig.add_annotation(text="No open positions",
-                           xref="paper", yref="paper", x=0.5, y=0.5,
-                           font=dict(size=14, color=FONT_MUT))
-        return fig
+    opt_rows = gt[(gt["leg_id"] != "TOTAL") & (gt["leg_id"] != "UND")].copy()                if not gt.empty else pd.DataFrame()
+    und_rows = gt[gt["leg_id"] == "UND"].copy()                if not gt.empty else pd.DataFrame()
 
-    # split option legs, underlying, total
-    opt_rows = gt[~gt["leg_id"].isin(["UND","TOTAL"])].copy()
-    und_rows = gt[gt["leg_id"] == "UND"].copy()
-    tot_row  = gt[gt["leg_id"] == "TOTAL"].copy()
+    # ── pixel heights (fixed, predictable) ───────────────────────────────
+    ROW_H   = 30   # px per data row
+    HDR_H   = 28   # px header row
+    PAD     = 16   # px padding between sections
+    MARG_T  = 50   # top margin
+    MARG_B  = 10   # bottom margin
 
-    cols = ["type","expiry","strike","iv","model","lots",
-            "price_paid","model_price","value","pnl",
-            "delta","gamma","theta","rho"]
-    headers = ["Type","Vcto","Strike","Vlt","Model","Lots",
-               "Price","Modelo","Value","P&L",
-               "Delta","Gamma","Theta","Rho"]
+    n_legs    = max(len(opt_rows), 1)
+    h_legs    = HDR_H + n_legs * ROW_H          # legs section px
+    h_und     = HDR_H + ROW_H                   # underlying section px
+    h_params  = HDR_H + ROW_H                   # params section px
+    h_total   = MARG_T + h_legs + PAD + h_und + PAD + h_params + MARG_B
 
-    def _fmt(col, v):
-        try:
-            fv = float(v)
-            if col in ["strike","price_paid","model_price","value","pnl"]:
-                return f"${fv:,.2f}"
-            if col in ["delta","gamma","theta","rho"]:
-                return f"{fv:,.2f}"
-            if col == "lots":
-                return f"{int(fv):,}"
-        except Exception:
-            pass
-        return str(v) if v is not None else "—"
+    # ── compute y domains bottom-up (0=bottom, 1=top in Plotly) ──────────
+    def px_to_frac(px_from_bottom):
+        return px_from_bottom / h_total
 
-    def build_rows(df):
-        cell_vals = [[] for _ in cols]
-        row_fills = []
-        font_cols  = [[] for _ in cols]
+    # params: bottom
+    y0_params = px_to_frac(MARG_B)
+    y1_params = px_to_frac(MARG_B + h_params)
 
-        for _, row in df.iterrows():
-            lots_val = row.get("lots", 0)
-            try:
-                is_short = float(lots_val) < 0
-            except Exception:
-                is_short = False
+    # underlying: above params
+    y0_und = px_to_frac(MARG_B + h_params + PAD)
+    y1_und = px_to_frac(MARG_B + h_params + PAD + h_und)
 
-            if row["leg_id"] == "UND":
-                fill = ROW_UND
-            elif row["leg_id"] == "TOTAL":
-                fill = ROW_TOT
-            elif is_short:
-                fill = ROW_SHORT
-            else:
-                fill = ROW_LONG
-
-            row_fills.append(fill)
-
-            for ci, col in enumerate(cols):
-                val = row.get(col, "")
-                cell_vals[ci].append(_fmt(col, val))
-
-                # colour pnl column
-                if col == "pnl":
-                    try:
-                        font_cols[ci].append(
-                            FONT_POS if float(val) >= 0 else FONT_NEG)
-                    except Exception:
-                        font_cols[ci].append(FONT_DARK)
-                elif col == "lots" and is_short:
-                    font_cols[ci].append(FONT_NEG)
-                else:
-                    font_cols[ci].append(FONT_DARK)
-
-        return cell_vals, row_fills, font_cols
-
-    opt_vals, opt_fills, opt_fonts = build_rows(opt_rows)
-
-    # underlying footer
-    und_cells = []
-    und_fill  = [ROW_UND] * max(len(und_rows), 1)
-    if not und_rows.empty:
-        for pos in book.underlying_pos:
-            if pos.status == "open":
-                und_cells = [
-                    [""], ["Underlying position:"], [""], [""], [""],
-                    [f"{pos.signed_lots:,.0f}"],
-                    [f"${pos.entry_price:,.2f}"],
-                    [f"${book.spot:,.2f}"],
-                    [f"${book.spot * pos.signed_lots:,.0f}"],
-                    [f"${(book.spot - pos.entry_price) * pos.signed_lots:,.0f}"],
-                    [""], [""], [""], [""],
-                ]
-
-    # total row
-    tot_cells = []
-    if not tot_row.empty:
-        r = tot_row.iloc[0]
-        pnl_v = float(r.get("pnl", 0))
-        tot_cells = [
-            ["TOTAL"], [""], [""], [""], [""], [""],
-            [""], [""],
-            [_fmt("value", r.get("value", 0))],
-            [f"${pnl_v:,.0f}"],
-            [_fmt("delta", r.get("delta", 0))],
-            [_fmt("gamma", r.get("gamma", 0))],
-            [_fmt("theta", r.get("theta", 0))],
-            [_fmt("rho",   r.get("rho",   0))],
-        ]
-
-    # merge all cell columns
-    all_vals  = opt_vals
-    all_fills = opt_fills
-    all_fonts = opt_fonts
-
-    if und_cells:
-        for ci in range(len(cols)):
-            all_vals[ci]  += und_cells[ci]
-            all_fonts[ci] += [HDR_FONT]
-        all_fills += [ROW_UND]
-
-    if tot_cells:
-        for ci in range(len(cols)):
-            all_vals[ci]  += tot_cells[ci]
-            pnl_val = float(tot_row.iloc[0].get("pnl", 0))
-            if cols[ci] == "pnl":
-                all_fonts[ci] += [FONT_POS if pnl_val >= 0 else FONT_NEG]
-            else:
-                all_fonts[ci] += [FONT_DARK]
-        all_fills += [ROW_TOT]
-
-    n_rows = len(all_fills)
+    # legs: above underlying
+    y0_legs = px_to_frac(MARG_B + h_params + PAD + h_und + PAD)
+    y1_legs = 1.0 - px_to_frac(MARG_T)
 
     fig = go.Figure()
+
+    # ── Legs table ────────────────────────────────────────────────────────
+    cols    = ["type","expiry","strike","iv","model","lots",
+               "price_paid","model_price","pnl","delta","gamma","theta","rho"]
+    tbl     = opt_rows[[c for c in cols if c in opt_rows.columns]].copy()               if not opt_rows.empty else pd.DataFrame(columns=cols)
+
+    fmt_map = {"strike":"${:,.0f}","price_paid":"${:,.2f}",
+               "model_price":"${:,.3f}","pnl":"${:,.0f}",
+               "delta":"{:,.2f}","gamma":"{:,.4f}",
+               "theta":"{:,.2f}","rho":"{:,.2f}"}
+
+    cell_vals, font_cols = [], []
+    for col in tbl.columns:
+        fmt_col, clr_col = [], []
+        for v in tbl[col]:
+            if col in fmt_map and isinstance(v, (int, float)):
+                try:
+                    fmt_col.append(fmt_map[col].format(float(v)))
+                except (TypeError, ValueError):
+                    fmt_col.append(str(v))
+            else:
+                fmt_col.append(str(v) if v is not None else "")
+            if col == "pnl":
+                clr_col.append(ORANGE if isinstance(v, (int, float)) and float(v) >= 0 else RED)
+            elif col == "lots":
+                clr_col.append(ORANGE if isinstance(v, (int, float)) and float(v) < 0 else GREEN)
+            else:
+                clr_col.append(WHITE)
+        cell_vals.append(fmt_col)
+        font_cols.append(clr_col)
+
+    row_fills = ["#1E1E1E" if i%2==0 else "#252525" for i in range(n_legs)]
+
     fig.add_trace(go.Table(
+        domain=dict(x=[0.0, 1.0], y=[y0_legs, y1_legs]),
         header=dict(
-            values=[f"<b>{h}</b>" for h in headers],
-            fill_color=HDR_BG,
-            font=dict(color=HDR_FONT, size=11, family="Arial"),
-            align="center",
-            height=28,
-            line=dict(color="#444441", width=0.5),
+            values=[f"<b>{c.replace('_',' ').upper()}</b>" for c in tbl.columns],
+            fill_color="#8B0000",
+            font=dict(color=ORANGE, size=10),
+            align="center", height=HDR_H,
+            line=dict(color="#444444", width=0.5),
         ),
         cells=dict(
-            values=all_vals,
-            fill_color=[[all_fills[r] for r in range(n_rows)]
-                        for _ in cols],
-            font=dict(color=all_fonts, size=11, family="Arial"),
-            align=["left","center","right","center","center",
-                   "right","right","right","right","right",
-                   "right","right","right","right"],
-            height=26,
-            line=dict(color="#D3D1C7", width=0.5),
+            values=cell_vals if cell_vals else [[]]*len(cols),
+            fill_color=[row_fills]*len(tbl.columns),
+            font=dict(color=font_cols if font_cols else [[WHITE]]*len(cols), size=11),
+            align=["left"]+["center"]*(len(tbl.columns)-1),
+            height=ROW_H,
+            line=dict(color="#333333", width=0.5),
+        ),
+    ))
+
+    # ── Underlying position ────────────────────────────────────────────────
+    if not und_rows.empty:
+        ur     = und_rows.iloc[0]
+        sign   = "Long" if float(ur.get("lots",0)) > 0 else "Short"
+        pos_str = f"{sign} {abs(float(ur.get('lots',0))):,.0f} @ ${float(ur.get('strike',0)):,.2f}"
+        pnl_v  = float(ur.get("pnl", 0))
+        dlt_v  = float(ur.get("delta", 0))
+        pnl_c  = ORANGE if pnl_v >= 0 else RED
+
+        fig.add_trace(go.Table(
+            domain=dict(x=[0.0, 1.0], y=[y0_und, y1_und]),
+            header=dict(
+                values=["<b>Underlying Position</b>","<b>P&L</b>","<b>Delta</b>"],
+                fill_color="#8B0000",
+                font=dict(color=ORANGE, size=10),
+                align="center", height=HDR_H,
+                line=dict(color="#444444", width=0.5),
+            ),
+            cells=dict(
+                values=[[pos_str],[f"${pnl_v:,.2f}"],[f"{dlt_v:,.2f}"]],
+                fill_color="#1E1E1E",
+                font=dict(color=[[WHITE],[pnl_c],[WHITE]], size=12,
+                          family="Arial Bold"),
+                align="center", height=ROW_H,
+                line=dict(color="#333333", width=0.5),
+            ),
+        ))
+
+    # ── Parameter strip ───────────────────────────────────────────────────
+    model_date = summ.get("model_date","—")
+    p_labels = ["Symbol","Spot","Vol","Risk Free",
+                "Div Yield","+Days","Model Date","Lot Size"]
+    p_vals   = [book.symbol, f"${book.spot:,.2f}", f"{book.vol:.1%}",
+                f"{book.risk_free_rate:.2f}%", f"{book.div_yield:.2f}%",
+                str(days_ahead), model_date, f"{book.lot_size:.0f}"]
+
+    fig.add_trace(go.Table(
+        domain=dict(x=[0.0, 1.0], y=[y0_params, y1_params]),
+        header=dict(
+            values=[f"<b>{label}</b>" for label in p_labels],
+            fill_color="#8B0000",
+            font=dict(color="#AAAAAA", size=10),
+            align="center", height=HDR_H,
+            line=dict(color="#444444", width=0.5),
+        ),
+        cells=dict(
+            values=[[v] for v in p_vals],
+            fill_color=RED,
+            font=dict(color=[[WHITE]]*len(p_vals), size=12, family="Arial Bold"),
+            align="center", height=ROW_H,
+            line=dict(color="#444444", width=0.5),
         ),
     ))
 
     fig.update_layout(
-        height=max(100 + n_rows * 30, 200),
-        paper_bgcolor="#F4F3EF",
-        margin=dict(l=10, r=10, t=10, b=10),
+        height=h_total,
+        paper_bgcolor=BG,
+        font=dict(family="Arial", color=WHITE, size=12),
+        margin=dict(l=20, r=20, t=MARG_T, b=MARG_B),
+        title=dict(text=f"<b>{book.symbol}</b> — Positions",
+                   font=dict(size=16, color=ORANGE, family="Arial Bold"),
+                   x=0.01, y=0.99),
     )
     return fig
 
@@ -5355,7 +5135,6 @@ def portfolio_summary(portfolio, days_ahead: int = 0) -> go.Figure:
     for col in tbl.columns:
         cell_vals.append([_fmt_cell(col, v) for v in tbl[col]])
 
-    pnl_col_idx = list(tbl.columns).index("expected_pnl") if "expected_pnl" in tbl.columns else None
     row_fill = ["white"] * (len(tbl) - 1) + ["#F4F3EF"]
 
     fig.add_trace(go.Table(
@@ -5413,7 +5192,7 @@ def portfolio_summary(portfolio, days_ahead: int = 0) -> go.Figure:
 
     # do NOT use _apply_layout — Table traces don't support xaxis
     fig.update_layout(
-        height=800,
+        height=560,
         paper_bgcolor="#F4F3EF",
         plot_bgcolor="#FAFAF9",
         font=dict(family="'Inter', monospace", size=11, color="#2C2C2A"),

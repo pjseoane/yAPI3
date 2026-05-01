@@ -34,7 +34,7 @@ import io
 import zipfile
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import numpy as np
 import pandas as pd
@@ -42,6 +42,8 @@ import requests
 from scipy import stats
 
 from yfinance_api3.classes.quant_analytics import QuantAnalytics
+
+FactorModel: TypeAlias = Literal["ff3", "ff5", "mom", "ff6"]
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +215,7 @@ class FactorResult:
 def run(
     quant: QuantAnalytics,
     symbol: str,
-    model: Literal["ff3", "ff5", "mom", "ff6"] = "ff5",
+    model: FactorModel = "ff5",
     period: str = "5y",
 ) -> FactorResult:
     """
@@ -306,7 +308,7 @@ def run(
 def run_bulk(
     quant: QuantAnalytics,
     symbols: list[str],
-    model: str = "ff5",
+    model: FactorModel = "ff5",
     period: str = "5y",
 ) -> pd.DataFrame:
     """
@@ -342,7 +344,8 @@ def compare_models(
       columns = alpha, alpha_pval, r_squared, adj_r2
     """
     rows = {}
-    for model in ["ff3", "ff5", "mom", "ff6"]:
+    models: list[FactorModel] = ["ff3", "ff5", "mom", "ff6"]
+    for model in models:
         try:
             r = run(quant, symbol, model=model, period=period)
             rows[model.upper()] = {

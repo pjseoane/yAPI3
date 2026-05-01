@@ -32,7 +32,7 @@ Usage
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from typing import Literal
 
@@ -237,8 +237,6 @@ class OptionsStrategy:
         strat.add_leg("call", strike=200, expiry="2025-06-20",
                       quantity=1, direction="long")
         """
-        rfr = risk_free_rate or self.risk_free_rate
-
         # fetch real market data for this leg
         chain = self.opt.chain(expiry, option_type=option_type)
         row   = chain[chain["strike"] == strike]
@@ -368,7 +366,7 @@ class OptionsStrategy:
 
         rows = []
         for days in day_steps:
-            row = {"days_ahead": int(days)}
+            row: dict[object, float | int] = {"days_ahead": int(days)}
             for s in spots:
                 total = sum(
                     leg.pnl_theoretical(s, int(days), self.risk_free_rate)
@@ -475,10 +473,10 @@ class OptionsStrategy:
             "max_loss_unlimited":   ml["unlimited"],
             "risk_reward":     round(rr, 2),
             "breakevens":      be,
-            "delta":           round(sum(l.delta(spot, self.risk_free_rate) for l in self.legs), 4),
-            "gamma":           round(sum(l.gamma(spot, self.risk_free_rate) for l in self.legs), 6),
-            "theta":           round(sum(l.theta(spot, self.risk_free_rate) for l in self.legs), 4),
-            "vega":            round(sum(l.vega(spot,  self.risk_free_rate) for l in self.legs), 4),
+            "delta":           round(sum(leg.delta(spot, self.risk_free_rate) for leg in self.legs), 4),
+            "gamma":           round(sum(leg.gamma(spot, self.risk_free_rate) for leg in self.legs), 6),
+            "theta":           round(sum(leg.theta(spot, self.risk_free_rate) for leg in self.legs), 4),
+            "vega":            round(sum(leg.vega(spot,  self.risk_free_rate) for leg in self.legs), 4),
         }
 
     def __repr__(self) -> str:

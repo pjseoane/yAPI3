@@ -3,9 +3,7 @@ options.py — Options data analysis built on StockClient.
 
 Fetches options chains via yfinance (no API key needed) and provides
 analysis tools for expiration, strikes, volume, open interest, IV,
-put/call ratios, max pain, and gamma exposure.
-
-Greeks will be added in a future version.
+    put/call ratios, max pain, Greeks, and gamma exposure.
 
 Usage
 -----
@@ -31,7 +29,6 @@ from __future__ import annotations
 
 import pandas as pd
 import numpy as np
-from dataclasses import dataclass
 
 from yfinance_api3.classes.stock_client import StockClient
 
@@ -54,9 +51,8 @@ class OptionsAnalyzer:
 
     Notes on Greeks
     ---------------
-    Greeks (delta, gamma, theta, vega) will be added in a future version.
-    Currently available: strike, volume, open_interest, implied_volatility,
-    bid, ask, last_price, in_the_money.
+    Greeks are taken from yfinance when available, with a Black-Scholes
+    fallback for missing values.
     """
 
     def __init__(self, client: StockClient, symbol: str) -> None:
@@ -364,7 +360,7 @@ class OptionsAnalyzer:
             )
             pain[s] = call_pain + put_pain
 
-        return float(min(pain, key=pain.get))
+        return float(min(pain, key=lambda strike: pain[strike]))
 
     def gamma_exposure(
         self,
@@ -372,26 +368,9 @@ class OptionsAnalyzer:
         spot: float | None = None,
     ) -> pd.DataFrame:
         """
-        Gamma Exposure (GEX) by strike.
+        Backwards-compatible open-interest proxy for gamma exposure by strike.
 
-        GEX estimates the dollar gamma that market makers are exposed to
-        at each strike. Large positive GEX = market makers are long gamma
-        (they sell rallies, buy dips → price stabilising).
-        Large negative GEX = short gamma (momentum amplifying).
-
-        Note: Without actual delta/gamma from a pricing model, this uses
-        open interest as a proxy for gamma concentration. True GEX requires
-        Greeks — this will be updated when Greeks are added.
-
-        Returns
-        -------
-        DataFrame: strike, call_oi, put_oi, net_gex (call_oi - put_oi),
-                   cumulative_gex
-
-        Example
-        -------
-        gex = opt.gamma_exposure("2025-06-20")
-        gex[gex["net_gex"].abs() > 1000]   # significant strikes
+        For model-based dollar GEX, use gex_by_strike().
         """
         if expiry is None:
             expiry = self.nearest_expiry(0)
@@ -402,19 +381,22 @@ class OptionsAnalyzer:
 
         strikes = sorted(set(calls.index) | set(puts.index))
         rows = []
-        for s in strikes:
-            c_oi = float(calls.get(s, 0))
-            p_oi = float(puts.get(s, 0))
+        for strike in strikes:
+            call_oi = float(calls.get(strike, 0))
+            put_oi = float(puts.get(strike, 0))
             rows.append({
-                "strike":   s,
-                "call_oi":  c_oi,
-                "put_oi":   p_oi,
-                "net_gex":  c_oi - p_oi,
+                "strike":   strike,
+                "call_oi":  call_oi,
+                "put_oi":   put_oi,
+                "net_gex":  call_oi - put_oi,
             })
 
         gex = pd.DataFrame(rows)
         gex["cumulative_gex"] = gex["net_gex"].cumsum()
+        if spot is not None:
+            gex["distance_from_spot"] = gex["strike"] - float(spot)
         return gex
+
 
     def vol_surface(
         self,
@@ -484,416 +466,19 @@ class OptionsAnalyzer:
         if expiry is None:
             expiry = self.nearest_expiry(0)
 
-        gex = self.gamma_exposure(expiry)
-        gex["total_oi"]  = gex["call_oi"] + gex["put_oi"]
-        gex["dominant"]  = gex.apply(
+        # get OI directly from chain — no dependency on gamma_exposure
+        df     = self.chain(expiry)
+        calls  = df[df["type"]=="call"][["strike","open_interest"]].rename(
+                     columns={"open_interest":"call_oi"})
+        puts   = df[df["type"]=="put"][["strike","open_interest"]].rename(
+                     columns={"open_interest":"put_oi"})
+        oi     = calls.merge(puts, on="strike", how="outer").fillna(0)
+        oi["total_oi"] = oi["call_oi"] + oi["put_oi"]
+        oi["dominant"] = oi.apply(
             lambda r: "call" if r["call_oi"] >= r["put_oi"] else "put", axis=1
         )
-        return gex[["strike","call_oi","put_oi","total_oi","dominant"]]
+        return oi[["strike","call_oi","put_oi","total_oi","dominant"]].sort_values("strike")
 
-    # ------------------------------------------------------------------
-    # Greeks
-    # ------------------------------------------------------------------
-
-    def greeks(
-        self,
-        expiry: str | None = None,
-        risk_free_rate: float = 0.05,
-    ) -> pd.DataFrame:
-        """
-        Return options chain enriched with Greeks.
-
-        Strategy
-        --------
-        1. Try yfinance native Greeks (available for liquid tickers like SPY, QQQ)
-        2. Fall back to Black-Scholes for any row missing gamma/delta
-
-        Greeks computed
-        ---------------
-        delta  : rate of change of option price vs underlying price
-                 call delta ∈ [0, 1]   put delta ∈ [-1, 0]
-                 ATM ≈ ±0.50
-        gamma  : rate of change of delta vs underlying price
-                 always positive, peaks at ATM, same for calls and puts
-        theta  : daily time decay (always negative)
-        vega   : sensitivity to 1% change in IV
-
-        Parameters
-        ----------
-        expiry         : expiration date (default = front month)
-        risk_free_rate : annual risk-free rate for B-S model (default 0.05)
-
-        Returns
-        -------
-        Full chain DataFrame with added columns:
-          delta, gamma, theta, vega, greek_source ("yfinance" | "black_scholes")
-
-        Example
-        -------
-        df = opt.greeks("2025-06-20")
-        calls = df[df["type"] == "call"].sort_values("gamma", ascending=False)
-        """
-        if expiry is None:
-            expiry = self.nearest_expiry(0)
-
-        df   = self.chain(expiry).copy()
-        spot = self._get_spot()
-        from datetime import date
-        dte  = max((pd.to_datetime(expiry).date() - date.today()).days, 1)
-        T    = dte / 365.0
-
-        # try to get yfinance greeks first
-        raw = self.client.get_options_chain(self.symbol, expiry)
-
-        def _extract_yf_greeks(raw_list, opt_type):
-            """Extract delta/gamma/theta/vega from yfinance if present."""
-            records = {}
-            for row in raw_list:
-                strike = float(row.get("strike", 0))
-                records[strike] = {
-                    "delta": row.get("delta"),
-                    "gamma": row.get("gamma"),
-                    "theta": row.get("theta"),
-                    "vega":  row.get("vega"),
-                }
-            return records
-
-        calls_raw = raw.get("calls", [])
-        puts_raw  = raw.get("puts",  [])
-        yf_calls  = _extract_yf_greeks(calls_raw, "call")
-        yf_puts   = _extract_yf_greeks(puts_raw,  "put")
-
-        # apply greeks row by row
-        deltas, gammas, thetas, vegas, sources = [], [], [], [], []
-
-        for _, row in df.iterrows():
-            strike = float(row["strike"])
-            iv     = float(row["implied_volatility"]) or 0.20
-            is_call = row["type"] == "call"
-
-            # try yfinance first
-            yf_data = yf_calls.get(strike, {}) if is_call else yf_puts.get(strike, {})
-            d = yf_data.get("delta")
-            g = yf_data.get("gamma")
-            t = yf_data.get("theta")
-            v = yf_data.get("vega")
-
-            if all(x is not None and x != 0 for x in [d, g]):
-                deltas.append(float(d))
-                gammas.append(float(g))
-                thetas.append(float(t) if t is not None else self._bs_theta(spot, strike, T, iv, risk_free_rate, is_call))
-                vegas.append(float(v)  if v  is not None else self._bs_vega(spot, strike, T, iv, risk_free_rate))
-                sources.append("yfinance")
-            else:
-                # fall back to Black-Scholes
-                d, g, t, v = self._bs_greeks(spot, strike, T, iv, risk_free_rate, is_call)
-                deltas.append(d)
-                gammas.append(g)
-                thetas.append(t)
-                vegas.append(v)
-                sources.append("black_scholes")
-
-        df["delta"]         = deltas
-        df["gamma"]         = gammas
-        df["theta"]         = thetas
-        df["vega"]          = vegas
-        df["greek_source"] = sources
-        return df
-
-    # ------------------------------------------------------------------
-    # Gamma Exposure (GEX)
-    # ------------------------------------------------------------------
-
-    def gex_by_strike(
-        self,
-        expiry: str | None = None,
-        risk_free_rate: float = 0.05,
-        contract_size: int = 100,
-    ) -> pd.DataFrame:
-        """
-        Gamma Exposure (GEX) by strike for one expiry.
-
-        GEX = Gamma × OI × contract_size × spot²  × 0.01
-
-        Market maker convention:
-          Calls → market makers are SHORT → their GEX = NEGATIVE (they buy dips)
-          Puts  → market makers are SHORT → their GEX = POSITIVE (they sell rallies)
-
-        Net GEX = call_gex + put_gex
-          > 0 : long gamma regime  → price-stabilising
-          < 0 : short gamma regime → price-amplifying (vol expansion)
-
-        GEX flip = strike where net GEX crosses zero — key support/resistance.
-
-        Returns
-        -------
-        DataFrame: strike, call_gex, put_gex, net_gex, cumulative_gex
-        """
-        if expiry is None:
-            expiry = self.nearest_expiry(0)
-
-        df   = self.greeks(expiry, risk_free_rate)
-        spot = self._get_spot()
-        scalar = contract_size * (spot ** 2) * 0.01
-
-        calls = df[df["type"] == "call"].copy()
-        puts  = df[df["type"] == "put"].copy()
-
-        # market makers SHORT options → calls positive, puts negative
-        calls["gex"] =  calls["gamma"] * calls["open_interest"] * scalar
-        puts["gex"]  = -puts["gamma"]  * puts["open_interest"]  * scalar
-
-        call_gex = calls.groupby("strike")["gex"].sum()
-        put_gex  = puts.groupby("strike")["gex"].sum()
-
-        strikes = sorted(set(call_gex.index) | set(put_gex.index))
-        rows = []
-        for s in strikes:
-            cg = float(call_gex.get(s, 0))
-            pg = float(put_gex.get(s, 0))
-            rows.append({
-                "strike":   s,
-                "call_gex": cg,
-                "put_gex":  pg,
-                "net_gex":  cg + pg,
-            })
-
-        gex_df = pd.DataFrame(rows)
-        gex_df["cumulative_gex"] = gex_df["net_gex"].cumsum()
-        return gex_df
-
-    def gex_by_expiry(
-        self,
-        max_expiries: int = 12,
-        risk_free_rate: float = 0.05,
-        contract_size: int = 100,
-    ) -> pd.DataFrame:
-        """
-        Total Gamma Exposure aggregated by expiry.
-
-        Shows how GEX is distributed across the term structure —
-        front-month expiries typically dominate total GEX.
-
-        Returns
-        -------
-        DataFrame: expiry, days_to_expiry, total_gex, call_gex, put_gex
-        sorted by expiry ascending.
-        """
-        from datetime import date
-        today   = date.today()
-        expiries = self.expiries()[:max_expiries]
-        rows     = []
-
-        for exp in expiries:
-            try:
-                gex = self.gex_by_strike(exp, risk_free_rate, contract_size)
-                dte = (pd.to_datetime(exp).date() - today).days
-                rows.append({
-                    "expiry":           exp,
-                    "days_to_expiry":   dte,
-                    "total_gex":        float(gex["net_gex"].sum()),
-                    "call_gex":         float(gex["call_gex"].sum()),
-                    "put_gex":          float(gex["put_gex"].sum()),
-                })
-            except Exception as e:
-                print(f"Skipping {exp}: {e}")
-
-        return pd.DataFrame(rows).sort_values("expiry").reset_index(drop=True)
-
-    def gex_total(
-        self,
-        max_expiries: int = 12,
-        risk_free_rate: float = 0.05,
-        contract_size: int = 100,
-    ) -> dict:
-        """
-        Grand total GEX across all expiries — the market regime indicator.
-
-        Returns
-        -------
-        dict:
-          total_gex        : sum of all GEX across all expiries ($)
-          call_gex         : total call GEX
-          put_gex          : total put GEX
-          regime           : "long_gamma" | "short_gamma"
-          regime_label     : human-readable description
-          dominant_expiry  : expiry with largest absolute GEX contribution
-          gex_flip_strikes : list of strikes near GEX zero crossing (front month)
-
-        Example
-        -------
-        total = opt.gex_total()
-        print(f"Market regime: {total['regime_label']}")
-        print(f"Total GEX: ${total['total_gex']:,.0f}")
-        """
-        by_exp = self.gex_by_expiry(max_expiries, risk_free_rate, contract_size)
-
-        if by_exp.empty:
-            return {}
-
-        total_gex = float(by_exp["total_gex"].sum())
-        call_gex  = float(by_exp["call_gex"].sum())
-        put_gex   = float(by_exp["put_gex"].sum())
-
-        regime = "long_gamma" if total_gex > 0 else "short_gamma"
-        regime_label = (
-            "Long gamma — market makers stabilise price (sell rallies, buy dips)"
-            if total_gex > 0 else
-            "Short gamma — market makers amplify moves (buy rallies, sell dips)"
-        )
-
-        dominant = by_exp.loc[by_exp["total_gex"].abs().idxmax(), "expiry"]
-
-        # GEX flip strikes from front month
-        try:
-            front_gex  = self.gex_by_strike(self.nearest_expiry(0),
-                                             risk_free_rate, contract_size)
-            flips = []
-            net   = front_gex["net_gex"].values
-            strikes = front_gex["strike"].values
-            for i in range(len(net) - 1):
-                if net[i] * net[i+1] < 0:   # sign change = zero crossing
-                    flips.append(float(strikes[i]))
-        except Exception:
-            flips = []
-
-        return {
-            "total_gex":        round(total_gex, 0),
-            "call_gex":         round(call_gex, 0),
-            "put_gex":          round(put_gex, 0),
-            "regime":           regime,
-            "regime_label":     regime_label,
-            "dominant_expiry":  dominant,
-            "gex_flip_strikes": flips,
-            "n_expiries":       len(by_exp),
-        }
-
-    # ------------------------------------------------------------------
-    # Unusual Activity
-    # ------------------------------------------------------------------
-
-    def unusual_activity(
-        self,
-        expiry: str | None = None,
-        vol_oi_threshold: float = 3.0,
-        min_volume: int = 100,
-        min_oi: int = 50,
-    ) -> pd.DataFrame:
-        """
-        Detect unusual options activity — volume significantly above OI.
-
-        A volume/OI ratio >> 1 means new positions are being opened today
-        (not just existing positions trading). This signals:
-          - Institutional hedging
-          - Speculative directional bets
-          - Pre-earnings positioning
-
-        Parameters
-        ----------
-        vol_oi_threshold : flag rows where volume / OI > this value (default 3.0)
-        min_volume       : minimum volume to consider (filters noise)
-        min_oi           : minimum OI to consider
-
-        Returns
-        -------
-        DataFrame sorted by vol_oi_ratio descending with columns:
-          type, strike, expiry, volume, open_interest, vol_oi_ratio,
-          implied_volatility, in_the_money, signal
-
-        Example
-        -------
-        unusual = opt.unusual_activity(min_volume=500)
-        print(unusual.head(10))
-        """
-        if expiry is None:
-            # scan front 4 expiries for unusual activity
-            expiries = self.expiries()[:4]
-        else:
-            expiries = [expiry]
-
-        frames = []
-        for exp in expiries:
-            try:
-                df = self.chain(exp, min_volume=min_volume, min_oi=min_oi)
-                df = df[df["volume"] > 0].copy()
-                df["vol_oi_ratio"] = df["volume"] / df["open_interest"].replace(0, 1)
-                frames.append(df)
-            except Exception:
-                pass
-
-        if not frames:
-            return pd.DataFrame()
-
-        combined = pd.concat(frames, ignore_index=True)
-        unusual  = combined[combined["vol_oi_ratio"] >= vol_oi_threshold].copy()
-
-        # signal label
-        spot = self._get_spot()
-        def _signal(row):
-            itm  = row.get("in_the_money", False)
-            kind = row["type"]
-            if kind == "call":
-                return "Bullish sweep" if not itm else "Covered call / hedge"
-            else:
-                return "Bearish sweep" if not itm else "Protective put"
-        unusual["signal"] = unusual.apply(_signal, axis=1)
-
-        cols = ["type", "strike", "expiry", "volume", "open_interest",
-                "vol_oi_ratio", "implied_volatility", "in_the_money", "signal"]
-        return (unusual[[c for c in cols if c in unusual.columns]]
-                .sort_values("vol_oi_ratio", ascending=False)
-                .reset_index(drop=True))
-
-    # ------------------------------------------------------------------
-    # Black-Scholes helpers (used as fallback for Greeks)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _bs_d1(S, K, T, sigma, r):
-        from math import log, sqrt
-        if sigma <= 0 or T <= 0:
-            return 0.0
-        return (log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt(T))
-
-    @staticmethod
-    def _bs_d2(d1, sigma, T):
-        from math import sqrt
-        return d1 - sigma * sqrt(T)
-
-    def _bs_greeks(self, S, K, T, sigma, r, is_call):
-        """Full Black-Scholes Greeks for one option."""
-        from math import exp, sqrt
-        from scipy.stats import norm
-
-        if T <= 0 or sigma <= 0:
-            return (1.0 if is_call else -1.0), 0.0, 0.0, 0.0
-
-        d1 = self._bs_d1(S, K, T, sigma, r)
-        d2 = self._bs_d2(d1, sigma, T)
-
-        # delta
-        delta = norm.cdf(d1) if is_call else norm.cdf(d1) - 1
-
-        # gamma (same for calls and puts)
-        gamma = norm.pdf(d1) / (S * sigma * sqrt(T))
-
-        # theta (per day)
-        theta_annual = (
-            -(S * norm.pdf(d1) * sigma) / (2 * sqrt(T))
-            - r * K * exp(-r * T) * (norm.cdf(d2) if is_call else norm.cdf(-d2))
-        )
-        theta = theta_annual / 365
-
-        # vega (per 1% change in IV)
-        vega = S * norm.pdf(d1) * sqrt(T) * 0.01
-
-        return round(delta, 4), round(gamma, 6), round(theta, 4), round(vega, 4)
-
-    def _bs_theta(self, S, K, T, sigma, r, is_call):
-        return self._bs_greeks(S, K, T, sigma, r, is_call)[2]
-
-    def _bs_vega(self, S, K, T, sigma, r):
-        return self._bs_greeks(S, K, T, sigma, r, True)[3]
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -916,8 +501,8 @@ class OptionsAnalyzer:
     # analysis, and position-level risk aggregation.
     # ------------------------------------------------------------------
 
+    @staticmethod
     def _black_scholes_greeks(
-        self,
         spot: float,
         strike: float,
         dte_years: float,
@@ -943,6 +528,17 @@ class OptionsAnalyzer:
         """
         from scipy.stats import norm
         import math
+
+        # force all inputs to float — pandas/numpy types cause TypeError in math.*
+        try:
+            spot          = float(spot)
+            strike        = float(strike)
+            dte_years     = float(dte_years)
+            iv            = float(iv)
+            risk_free_rate = float(risk_free_rate)
+        except (TypeError, ValueError):
+            return {"delta": 0.0, "gamma": 0.0, "theta": 0.0,
+                    "vega": 0.0, "rho": 0.0, "theoretical_price": 0.0}
 
         if dte_years <= 0 or iv <= 0 or spot <= 0 or strike <= 0:
             return {"delta": 0.0, "gamma": 0.0, "theta": 0.0,
@@ -1052,9 +648,13 @@ class OptionsAnalyzer:
         for _, row in df.iterrows():
             key    = (round(float(row["strike"]), 2), row["type"])
             iv     = float(row.get("implied_volatility", 0)) or 0.0
+            # yfinance sometimes returns IV as raw % (4.18 = 418%) not decimal (0.0418)
+            # normalise: anything > 5.0 is clearly a percentage, divide by 100
+            if iv > 5.0:
+                iv = iv / 100.0
             bs     = self._black_scholes_greeks(
-                        spot, row["strike"], dte_years, iv,
-                        risk_free_rate, row["type"])
+                        float(spot), float(row["strike"]), float(dte_years),
+                        float(iv), float(risk_free_rate), row["type"])
 
             yf = yf_greeks.get(key, {})
             has_yf = (yf and not np.isnan(yf.get("delta", np.nan)))

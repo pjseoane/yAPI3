@@ -51,7 +51,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from datetime import date, datetime
 from typing import Literal
 
@@ -61,7 +61,7 @@ import pandas as pd
 from yfinance_api3.classes.pricing import (
     BlackScholesModel, Binomial, BaroneAdesiWhaley, Engine, PricingStrategy,
     OptionData, OptionType, UnderlyingData,
-    ContractType, ExerciseType, Space,
+    ContractType, ExerciseType, OptionModel, Space,
 )
 
 
@@ -98,8 +98,8 @@ class OptionLegRecord:
     instrument:  str   = "equity"
     lot_size:    float = 100.0
     status:      str   = "open"
-    close_price: float = None
-    trade_date:  str   = None
+    close_price: float | None = None
+    trade_date:  str | None   = None
     notes:       str   = ""
 
     @property
@@ -131,8 +131,8 @@ class UnderlyingRecord:
     direction:   str   = "long"     # "long" | "short"
     instrument:  str   = "equity"   # "equity" | "futures"
     status:      str   = "open"
-    close_price: float = None
-    trade_date:  str   = None
+    close_price: float | None = None
+    trade_date:  str | None   = None
     notes:       str   = ""
 
     @property
@@ -168,7 +168,7 @@ class PositionsBook:
     def __init__(
         self,
         symbol:         str,
-        name:           str          = None,
+        name:           str | None   = None,
         spot:           float        = 0.0,
         vol:            float        = 0.30,
         risk_free_rate: float        = 3.5,    # % convention
@@ -206,7 +206,7 @@ class PositionsBook:
         price:       float,
         iv:          float,
         instrument:  Literal["equity", "futures", "american", "whaley"] = "whaley",
-        lot_size:    float = None,
+        lot_size:    float | None = None,
         notes:       str   = "",
     ) -> str:
         """
@@ -329,7 +329,7 @@ class PositionsBook:
 
         if leg.instrument == "whaley":
             # BAW quadratic approximation — fast American, used as default
-            model = BaroneAdesiWhaley(opt_data, und_data)
+            model: OptionModel = BaroneAdesiWhaley(opt_data, und_data)
         elif leg.instrument == "american":
             # Binomial CRR — accurate but slow, use for edge cases
             model = Binomial(opt_data, und_data,
@@ -382,8 +382,6 @@ class PositionsBook:
             out    = engine.get_model_outputs()
             lots   = leg.lots
             sz     = leg.lot_size
-            sign   = 1 if leg.option_type == "call" else -1
-
             model_price = out["prima"]
             value       = model_price * lots * sz
             cost        = leg.price * lots * sz
@@ -539,7 +537,7 @@ class PositionsBook:
     def payoff_curves(
         self,
         days_ahead: int = 0,
-        space: Space    = None,
+        space: Space | None = None,
     ) -> pd.DataFrame:
         """
         Combined strategy payoff curves across price range.
@@ -614,7 +612,7 @@ class PositionsBook:
             "closed_pnl":     self.closed_pnl,
             "created_at":     self.created_at,
             "updated_at":     datetime.now().isoformat(),
-            "option_legs":    [l.to_dict() for l in self.option_legs],
+            "option_legs":    [leg.to_dict() for leg in self.option_legs],
             "underlying_pos": [p.to_dict() for p in self.underlying_pos],
         }
         with open(path, "w", encoding="utf-8") as f:
@@ -640,14 +638,14 @@ class PositionsBook:
         book.closed_pnl     = data.get("closed_pnl", 0.0)
         book.created_at     = data.get("created_at", datetime.now().isoformat())
         book.updated_at     = data.get("updated_at", datetime.now().isoformat())
-        book.option_legs    = [OptionLegRecord.from_dict(l)
-                               for l in data.get("option_legs", [])]
+        book.option_legs    = [OptionLegRecord.from_dict(leg)
+                               for leg in data.get("option_legs", [])]
         book.underlying_pos = [UnderlyingRecord.from_dict(p)
                                for p in data.get("underlying_pos", [])]
         return book
 
     def __repr__(self) -> str:
-        open_legs = sum(1 for l in self.option_legs if l.status == "open")
+        open_legs = sum(1 for leg in self.option_legs if leg.status == "open")
         return (f"PositionsBook({self.symbol}  "
                 f"spot=${self.spot:,.2f}  "
                 f"legs={open_legs}  "
@@ -678,7 +676,7 @@ class PortfolioBook:
         self.book_paths: dict[str, str]          = {}
         self.created_at = datetime.now().isoformat()
 
-    def add_book(self, book: PositionsBook, path: str = None) -> None:
+    def add_book(self, book: PositionsBook, path: str | None = None) -> None:
         """Add a PositionsBook. Optionally record its save path."""
         self.books[book.symbol] = book
         if path:
@@ -779,7 +777,7 @@ class WatchList:
         self.name    = name
         self.tickers: dict[str, dict] = {}
 
-    def add(self, symbol: str, notes: str = "", tags: list = None) -> None:
+    def add(self, symbol: str, notes: str = "", tags: list | None = None) -> None:
         self.tickers[symbol.upper()] = {
             "symbol":   symbol.upper(),
             "notes":    notes,
