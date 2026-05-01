@@ -26,6 +26,7 @@ dependencies = [
     # plotting
     "plotly",
     "matplotlib",       # used by backtest fallback plot
+    "nbformat>=4.2.0",  # for plotly rendering in notebooks
     # file formats
     "openpyxl",         # SSGA XLSX holdings parsing
 ]
