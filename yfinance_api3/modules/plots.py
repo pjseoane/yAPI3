@@ -13,7 +13,7 @@ Equity     : cumulative_returns, drawdown, rolling_volatility, rolling_sharpe,
              returns_distribution, correlation_heatmap, metrics_bar, scatter
 Risk       : monte_carlo, best_worst_days, extreme_days_concentration
 Seasonality: seasonality, seasonality_heatmap, seasonality_comparison_clean,
-             seasonality_box
+             seasonality_box, seasonality_stats_table
 Portfolio  : efficient_frontier, kelly, backtest, rolling_returns
 Factors    : factor_exposure, rolling_factor_betas, factor_comparison
 ETF        : sp500_concentration
@@ -37,27 +37,28 @@ from yfinance_api3.classes.quant_analytics import QuantAnalytics
 _PALETTE = px.colors.qualitative.T10
 
 _LAYOUT = dict(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="#FAFAF9",
-    font=dict(family="sans-serif", color="#5F5E5A", size=12),
-    hoverlabel=dict(bgcolor="white", font_size=12),
+    template="plotly_dark",
+    paper_bgcolor="#111111",
+    plot_bgcolor="#111111",
+    font=dict(family="sans-serif", color="#EEEEEE", size=12),
+    hoverlabel=dict(bgcolor="#222222", font_size=12, font_color="#EEEEEE"),
     margin=dict(l=60, r=40, t=70, b=60),
     legend=dict(
         bgcolor="rgba(0,0,0,0)",
         borderwidth=0,
-        font=dict(size=11),
+        font=dict(size=11, color="#EEEEEE"),
     ),
     xaxis=dict(
-        gridcolor="#D3D1C7", gridwidth=0.5,
-        linecolor="#D3D1C7", zerolinecolor="#B4B2A9",
-        tickfont=dict(size=10, color="#888780"),
-        title_font=dict(size=12, color="#5F5E5A"),
+        gridcolor="#333333", gridwidth=0.5,
+        linecolor="#333333", zerolinecolor="#444444",
+        tickfont=dict(size=10, color="#AAAAAA"),
+        title_font=dict(size=12, color="#EEEEEE"),
     ),
     yaxis=dict(
-        gridcolor="#D3D1C7", gridwidth=0.5,
-        linecolor="#D3D1C7", zerolinecolor="#B4B2A9",
-        tickfont=dict(size=10, color="#888780"),
-        title_font=dict(size=12, color="#5F5E5A"),
+        gridcolor="#333333", gridwidth=0.5,
+        linecolor="#333333", zerolinecolor="#444444",
+        tickfont=dict(size=10, color="#AAAAAA"),
+        title_font=dict(size=12, color="#EEEEEE"),
     ),
 )
 
@@ -81,7 +82,7 @@ def _apply_layout(fig: go.Figure, title: str, subtitle: str = "") -> go.Figure:
     """
     full_title = f"<b>{title}</b>"
     if subtitle:
-        full_title += f"<br><sup style='color:#888780'>{subtitle}</sup>"
+        full_title += f"<br><sup style='color:#AAAAAA'>{subtitle}</sup>"
 
     has_table = any(isinstance(t, go.Table) for t in fig.data)
 
@@ -94,8 +95,16 @@ def _apply_layout(fig: go.Figure, title: str, subtitle: str = "") -> go.Figure:
 
     fig.update_layout(
         **safe_layout,
-        title=dict(text=full_title, font=dict(size=15, color="#2C2C2A"), x=0.02),
+        title=dict(text=full_title, font=dict(size=15, color="#EEEEEE"), x=0.02),
     )
+    
+    # Overwrite grid and text colors universally for all plots after functions modify them.
+    try:
+        fig.update_xaxes(gridcolor="#333333", linecolor="#333333", tickfont=dict(color="#AAAAAA"))
+        fig.update_yaxes(gridcolor="#333333", linecolor="#333333", tickfont=dict(color="#AAAAAA"))
+    except Exception:
+        pass
+
     return fig
 
 
@@ -1536,6 +1545,7 @@ def seasonality(
             fill="tozeroy",
             fillcolor="rgba(55,138,221,0.08)",
             name="Cumulative drift",
+            showlegend=False,
             hovertemplate="%{x}<br>Cumulative: %{y:.2%}<extra></extra>",
         ), row=2, col=1)
 
@@ -2660,6 +2670,69 @@ def seasonality_box(
         boxgap=0.3,
         boxgroupgap=0.1,
     )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Seasonality stats table
+# ---------------------------------------------------------------------------
+
+def seasonality_stats_table(
+    stats: pd.DataFrame,
+    symbol: str = "",
+    period: str = "",
+    granularity: str = "monthly",
+) -> go.Figure:
+    """
+    Renders the seasonality statistics DataFrame as a clean Plotly table.
+
+    Parameters
+    ----------
+    stats : DataFrame returned by quant.seasonality_stats()
+    symbol : Optional symbol name for the title
+    period : Optional period string for the subtitle
+    granularity : "monthly" or "weekly" for the subtitle
+    """
+    df = stats.copy()
+    df.insert(0, "Period", df.index)
+    
+    header_values = [f"<b>{str(c).replace('_', ' ').capitalize()}</b>" for c in df.columns]
+    
+    def fmt(c, v):
+        if pd.isna(v): return "—"
+        if c in ["mean", "median", "std", "min", "max"]: return f"{v:+.2%}"
+        if c == "win_rate": return f"{v:.0%}"
+        if c in ["skew", "sharpe"]: return f"{v:.2f}"
+        if c in ["n_obs", "best_year", "worst_year"]: return f"{int(v)}"
+        return str(v)
+        
+    cell_values = []
+    for col in df.columns:
+        cell_values.append([fmt(col, v) for v in df[col]])
+        
+    fig = go.Figure(data=[go.Table(
+        header=dict(
+            values=header_values,
+            fill_color="#F4F3EF",
+            font=dict(size=11, color="#888780"),
+            align="center",
+            height=28,
+            line=dict(color="#D3D1C7", width=0.5),
+        ),
+        cells=dict(
+            values=cell_values,
+            fill_color="white",
+            font=dict(size=12, color="#2C2C2A"),
+            align="center",
+            height=26,
+            line=dict(color="#D3D1C7", width=0.5),
+        )
+    )])
+    
+    title_str = f"{symbol} — {granularity.capitalize()} Seasonality Statistics" if symbol else "Seasonality Statistics"
+    sub_str = f"period: {_period_label(period)}" if period else ""
+    
+    _apply_layout(fig, title=title_str, subtitle=sub_str)
     return fig
 
 
