@@ -4686,11 +4686,9 @@ def positions_book(
     Build up: chart → summary table → parameter strip.
     """
     import math
-    from yfinance_api3.classes.pricing import Space as PricingSpace
 
-    space  = PricingSpace(dStd=d_std, days=max(days_ahead, 1), steps=steps)
     summ   = book.summary(days_ahead=days_ahead)
-    curves = book.payoff_curves(days_ahead=days_ahead, space=space)
+    curves = book.payoff_curves(days_ahead=days_ahead, d_std=d_std, steps=steps)
     spot   = book.spot
 
     BG = "#1a1a1a"
@@ -4806,6 +4804,7 @@ def positions_book(
                 tickfont=dict(size=11, color=WHITE),
                 gridcolor="#2a2a2a", linecolor="#555555",
                 showticklabels=True,
+                nticks=12,
             ),
             yaxis=dict(
                 domain=[0.0, 1.0],

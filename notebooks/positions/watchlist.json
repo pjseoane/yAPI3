@@ -5,13 +5,13 @@
       "symbol": "INTC",
       "notes": "short calls position",
       "tags": [],
-      "added_at": "2026-05-01"
+      "added_at": "2026-05-02"
     },
     "SPY": {
       "symbol": "SPY",
       "notes": "hedge",
       "tags": [],
-      "added_at": "2026-05-01"
+      "added_at": "2026-05-02"
     }
   }
 }

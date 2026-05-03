@@ -431,14 +431,11 @@ class Binomial(OptionModel):
         gamma  = ((gamma1 - gamma2)
                   / ((stock_vec[mid - 1] - stock_vec[mid + 1]) / 2))
 
-        # 2 extra steps for theta
-        for i in range(extrasteps - 1, 0, -1):
-            option_vec[:-1] = discount * (one_minus_p * option_vec[1:]
-                                          + p * option_vec[:-1])
-        theta = (prima - option_vec[mid - 1]) / (2 * T_days / self.steps)
-
-        # vega and rho via B-S approximation
+        # theta, vega, rho via Black-Scholes (standard industry practice)
+        # Theta via the extra-steps trick has numerical instability.
+        # B-S theta is exact and consistent. Same approach used for vega and rho.
         bs_out = BlackScholesModel(self.optionObj, self.underlyingObj).get_model_outputs()
+        theta  = bs_out["theta"]
         vega   = bs_out["vega"]
         rho    = bs_out["rho"]
 
