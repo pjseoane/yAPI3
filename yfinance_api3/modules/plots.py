@@ -5122,3 +5122,305 @@ def portfolio_summary(portfolio, days_ahead: int = 0) -> go.Figure:
         ),
     )
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Bitcoin Power Law plots
+# ---------------------------------------------------------------------------
+
+def powerlaw_chart(pl) -> go.Figure:
+    """
+    Bitcoin Power Law corridor chart — log-log scale.
+
+    Shows price history against the power law model with percentile
+    corridor bands. The straight line on log-log scale is the
+    defining characteristic of a power law relationship.
+
+    Reading
+    -------
+    Price near floor  → historically strong accumulation zone
+    Price near ceiling → historically overheated / distribution zone
+    """
+    r   = pl.result
+    df  = r.data
+
+    fig = go.Figure()
+
+    # ── corridor fill ─────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["ceiling_price"],
+        mode="lines", line=dict(width=0),
+        showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["floor_price"],
+        mode="lines", line=dict(width=0),
+        fill="tonexty",
+        fillcolor="rgba(255,165,0,0.12)",
+        showlegend=False, hoverinfo="skip",
+    ))
+
+    # ── corridor bands ────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["floor_price"],
+        mode="lines", name=f"Floor ({pl.corridor_low}th pct)",
+        line=dict(color="#1D9E75", width=1.5, dash="dash"),
+        hovertemplate="Floor: $%{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["median_price"],
+        mode="lines", name="Median (50th pct)",
+        line=dict(color="#BA7517", width=1.5, dash="dot"),
+        hovertemplate="Median: $%{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["ceiling_price"],
+        mode="lines", name=f"Ceiling ({pl.corridor_high}th pct)",
+        line=dict(color="#E24B4A", width=1.5, dash="dash"),
+        hovertemplate="Ceiling: $%{y:,.0f}<extra></extra>",
+    ))
+
+    # ── actual price ──────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["close"],
+        mode="lines", name="BTC Price",
+        line=dict(color="#378ADD", width=1.5),
+        hovertemplate="%{x|%Y-%m-%d}<br>$%{y:,.0f}<extra></extra>",
+    ))
+
+    # current price marker
+    latest = df.iloc[-1]
+    pos    = pl.current_position()
+    fig.add_trace(go.Scatter(
+        x=[latest.name], y=[latest["close"]],
+        mode="markers", name="Current",
+        marker=dict(size=10, color="#FFFFFF",
+                    line=dict(color="#378ADD", width=2)),
+        hovertemplate=f"Now: ${latest['close']:,.0f}<extra></extra>",
+    ))
+
+    _apply_date_layout(
+        fig,
+        title="Bitcoin — Power Law Corridor",
+        subtitle=(
+            f"log(P) = {r.a:.3f} + {r.b:.3f}×log(days)  ·  "
+            f"R²={r.r_squared:.4f}  ·  "
+            f"Phase: {pos['phase']}  ·  "
+            f"Position: {pos['corridor_pct']:.1%} of corridor"
+        ),
+    )
+    fig.update_yaxes(type="log", tickformat="$,.0f",
+                     title_text="Price (log scale)")
+    fig.update_layout(
+        height=560,
+        legend=dict(orientation="h", y=1.01, x=0,
+                    font=dict(size=11)),
+    )
+    return fig
+
+
+def powerlaw_residuals(pl) -> go.Figure:
+    """
+    Power Law oscillator — residuals from the fitted model.
+
+    Shows where Bitcoin price is relative to the power law trend.
+    Values above zero = above model price (expensive).
+    Values below zero = below model price (cheap).
+
+    Corridor bands shown as horizontal reference lines.
+    """
+    r  = pl.result
+    df = r.data
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.65, 0.35],
+        vertical_spacing=0.08,
+        subplot_titles=["Power Law Residuals (log-price deviation from model)",
+                        "Corridor position (0=floor, 1=ceiling)"],
+    )
+
+    # ── residuals ─────────────────────────────────────────────────────────
+    colors = ["#E24B4A" if v > r.percentiles[pl.corridor_high]
+              else "#1D9E75" if v < r.percentiles[pl.corridor_low]
+              else "#378ADD"
+              for v in df["residual"]]
+
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["residual"],
+        mode="lines", name="Residual",
+        line=dict(color="#378ADD", width=1.2),
+        hovertemplate="%{x|%Y-%m-%d}<br>Residual: %{y:.3f}<extra></extra>",
+    ), row=1, col=1)
+
+    # corridor band lines
+    for pct, color, label in [
+        (pl.corridor_low,  "#1D9E75", f"{pl.corridor_low}th pct (floor)"),
+        (50,               "#BA7517", "50th pct (median)"),
+        (pl.corridor_high, "#E24B4A", f"{pl.corridor_high}th pct (ceiling)"),
+    ]:
+        val = r.percentiles[pct]
+        fig.add_hline(y=val, row=1, col=1,
+                      line=dict(color=color, width=1, dash="dash"),
+                      annotation=dict(text=f"{label}: {val:.3f}",
+                                      font=dict(size=9, color=color),
+                                      xanchor="right", x=1))
+
+    fig.add_hline(y=0, row=1, col=1,
+                  line=dict(color="#B4B2A9", width=0.8))
+
+    fig.update_xaxes(gridcolor="#D3D1C7", row=1, col=1)
+    fig.update_yaxes(title_text="Log residual", gridcolor="#D3D1C7",
+                     row=1, col=1)
+
+    # ── corridor position 0-1 ─────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["corridor_pct"].clip(-0.5, 1.5),
+        mode="lines", name="Corridor %",
+        line=dict(color="#BA7517", width=1.5),
+        fill="tozeroy", fillcolor="rgba(186,117,23,0.15)",
+        hovertemplate="%{x|%Y-%m-%d}<br>Position: %{y:.1%}<extra></extra>",
+    ), row=2, col=1)
+
+    for y, color, label in [(0, "#1D9E75", "Floor"),
+                             (0.5, "#BA7517", "Mid"),
+                             (1, "#E24B4A", "Ceiling")]:
+        fig.add_hline(y=y, row=2, col=1,
+                      line=dict(color=color, width=1, dash="dot"),
+                      annotation=dict(text=label,
+                                      font=dict(size=9, color=color)))
+
+    fig.update_xaxes(gridcolor="#D3D1C7", row=2, col=1)
+    fig.update_yaxes(title_text="Corridor position",
+                     tickformat=".0%", gridcolor="#D3D1C7", row=2, col=1)
+
+    # current position marker
+    pos = pl.current_position()
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.01, y=0.99,
+        text=(f"<b>Current: ${pos['price']:,.0f}</b><br>"
+              f"Phase: {pos['phase']}<br>"
+              f"Position: {pos['corridor_pct']:.1%} of corridor<br>"
+              f"Next halving: {pos['days_to_halving']}d"),
+        showarrow=False, align="left",
+        font=dict(size=10, color="#5F5E5A"),
+        bgcolor="rgba(255,255,255,0.90)",
+        bordercolor="#D3D1C7", borderwidth=0.5, borderpad=8,
+    )
+
+    _apply_date_layout(
+        fig,
+        title="Bitcoin — Power Law Oscillator",
+        subtitle="Residuals from log(P) = a + b×log(days)  ·  green = undervalued  ·  red = overvalued",
+    )
+    fig.update_layout(height=620)
+    return fig
+
+
+def powerlaw_forecast(pl, years: int = 4) -> go.Figure:
+    """
+    Forward price projection using the Power Law model.
+
+    Shows historical price + forward corridor bands.
+    Use to estimate fair value ranges at future dates.
+    """
+    r    = pl.result
+    df   = r.data
+    fwd  = pl.forecast(years=years)
+
+    fig = go.Figure()
+
+    # ── historical corridor ───────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["floor_price"],
+        mode="lines", name="Historical floor",
+        line=dict(color="#1D9E75", width=1, dash="dash"),
+        hovertemplate="Floor: $%{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["ceiling_price"],
+        mode="lines", name="Historical ceiling",
+        line=dict(color="#E24B4A", width=1, dash="dash"),
+        hovertemplate="Ceiling: $%{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["close"],
+        mode="lines", name="BTC Price",
+        line=dict(color="#378ADD", width=1.5),
+        hovertemplate="%{x|%Y-%m-%d}<br>$%{y:,.0f}<extra></extra>",
+    ))
+
+    # ── forecast corridor ─────────────────────────────────────────────────
+    fwd_dates = pd.to_datetime(fwd["date"])
+
+    fig.add_trace(go.Scatter(
+        x=fwd_dates, y=fwd["ceiling_price"],
+        mode="lines", line=dict(width=0),
+        showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=fwd_dates, y=fwd["floor_price"],
+        mode="lines", line=dict(width=0),
+        fill="tonexty", fillcolor="rgba(55,138,221,0.10)",
+        showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=fwd_dates, y=fwd["floor_price"],
+        mode="lines", name=f"Forecast floor",
+        line=dict(color="#1D9E75", width=2),
+        hovertemplate="%{x|%Y-%m-%d}<br>Floor: $%{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=fwd_dates, y=fwd["median_price"],
+        mode="lines", name="Forecast median",
+        line=dict(color="#BA7517", width=2, dash="dot"),
+        hovertemplate="%{x|%Y-%m-%d}<br>Median: $%{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=fwd_dates, y=fwd["ceiling_price"],
+        mode="lines", name="Forecast ceiling",
+        line=dict(color="#E24B4A", width=2),
+        hovertemplate="%{x|%Y-%m-%d}<br>Ceiling: $%{y:,.0f}<extra></extra>",
+    ))
+
+    # next halving line
+    pos = pl.current_position()
+    from datetime import date, timedelta
+    next_halving = date(2024, 4, 20) + timedelta(days=4 * 365)
+    fig.add_vline(x=pd.Timestamp(next_halving).timestamp() * 1000,
+                  line=dict(color="#BA7517", width=1.5, dash="dot"),
+                  annotation=dict(text=f"Next halving ~{next_halving.strftime('%b %Y')}",
+                                  font=dict(size=10, color="#BA7517")))
+
+    # 1y and 4y fair value annotations
+    fv1 = pl.fair_value(date.today() + timedelta(days=365))
+    fv4 = pl.fair_value(date.today() + timedelta(days=4*365))
+    ann = (
+        f"<b>Fair Value Projections</b><br>"
+        f"+1y: ${fv1['floor_price']:,.0f} — ${fv1['ceiling_price']:,.0f}<br>"
+        f"+4y: ${fv4['floor_price']:,.0f} — ${fv4['ceiling_price']:,.0f}"
+    )
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.01, y=0.99,
+        text=ann, showarrow=False, align="left",
+        font=dict(size=10, color="#5F5E5A"),
+        bgcolor="rgba(255,255,255,0.90)",
+        bordercolor="#D3D1C7", borderwidth=0.5, borderpad=8,
+    )
+
+    _apply_date_layout(
+        fig,
+        title=f"Bitcoin — Power Law Forecast (+{years} years)",
+        subtitle=(
+            f"R²={r.r_squared:.4f}  ·  "
+            f"Exponent b={r.b:.4f}  ·  "
+            f"Shaded = forecast corridor"
+        ),
+    )
+    fig.update_yaxes(type="log", tickformat="$,.0f",
+                     title_text="Price (log scale)")
+    fig.update_layout(
+        height=560,
+        legend=dict(orientation="h", y=1.01, x=0, font=dict(size=11)),
+    )
+    return fig
