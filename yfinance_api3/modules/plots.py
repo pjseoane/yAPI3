@@ -5424,3 +5424,183 @@ def powerlaw_forecast(pl, years: int = 4) -> go.Figure:
         legend=dict(orientation="h", y=1.01, x=0, font=dict(size=11)),
     )
     return fig
+
+
+def seasonality_combined_score(
+    quant,
+    symbol: str,
+    period: str = "15y",
+    holding_years: list = None,
+) -> go.Figure:
+    """
+    Visual ranking of calendar months by combined seasonal score.
+
+    Shows each month Jan-Dec with its combined score, Sharpe per
+    holding period, win rates and signal label.
+
+    Green = strong buy signal, red = avoid, grey = neutral.
+    """
+    if holding_years is None:
+        holding_years = [2, 5]
+
+    df = quant.seasonality_combined_score(
+        symbol, period=period, holding_years=holding_years
+    )
+
+    # restore natural month order for x-axis
+    month_order = ["Jan","Feb","Mar","Apr","May","Jun",
+                   "Jul","Aug","Sep","Oct","Nov","Dec"]
+    df = df.reindex(month_order).dropna(subset=["combined_score"])
+    # ensure numeric types
+    for col in df.columns:
+        if col not in ["signal", "edge"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    H0, H1 = holding_years[0], holding_years[-1]
+
+    def _signal_color(signal):
+        return {"strong buy": "#1D9E75",
+                "buy":        "#7DCFB6",
+                "neutral":    "#B4B2A9",
+                "avoid":      "#E24B4A"}.get(signal, "#B4B2A9")
+
+    bar_colors = [_signal_color(s) for s in df["signal"]]
+
+    fig = make_subplots(
+        rows=3, cols=1,
+        row_heights=[0.45, 0.30, 0.25],
+        vertical_spacing=0.08,
+        subplot_titles=[
+            f"Combined seasonal score — {symbol} ({period})",
+            f"Sharpe by holding period ({H0}y vs {H1}y)",
+            f"Win rate by holding period",
+        ],
+    )
+
+    # ── Panel 1: combined score bars ──────────────────────────────────────
+    fig.add_trace(go.Bar(
+        x=df.index,
+        y=df["combined_score"],
+        marker_color=bar_colors,
+        marker_line_width=0,
+        name="Combined score",
+        text=[f"{s}<br>{v:+.3f}" for s, v in
+              zip(df["signal"], df["combined_score"])],
+        textposition="outside",
+        textfont=dict(size=9),
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Score: %{y:.3f}<br>"
+            "Signal: %{text}<extra></extra>"
+        ),
+        customdata=df["signal"].values,
+    ), row=1, col=1)
+
+    fig.add_hline(y=0, row=1, col=1,
+                  line=dict(color="#B4B2A9", width=0.8))
+    fig.add_hrect(y0=0.6, y1=df["combined_score"].max()*1.1,
+                  row=1, col=1,
+                  fillcolor="rgba(29,158,117,0.06)",
+                  line_width=0)
+    fig.add_hrect(y0=df["combined_score"].min()*1.1, y1=-0.1,
+                  row=1, col=1,
+                  fillcolor="rgba(226,75,74,0.06)",
+                  line_width=0)
+
+    fig.update_xaxes(tickfont=dict(size=11), row=1, col=1)
+    fig.update_yaxes(title_text="Score", gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"), row=1, col=1)
+
+    # ── Panel 2: Sharpe bars grouped ─────────────────────────────────────
+    s0_col = f"sharpe_{H0}y"
+    s1_col = f"sharpe_{H1}y"
+
+    for col, label, color in [
+        (s0_col, f"{H0}y Sharpe", "#378ADD"),
+        (s1_col, f"{H1}y Sharpe", "#BA7517"),
+    ]:
+        if col in df.columns:
+            fig.add_trace(go.Bar(
+                x=df.index,
+                y=df[col],
+                name=label,
+                marker_color=color,
+                marker_line_width=0,
+                opacity=0.85,
+                hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y:.3f}}<extra></extra>",
+            ), row=2, col=1)
+
+    fig.add_hline(y=0, row=2, col=1,
+                  line=dict(color="#B4B2A9", width=0.8))
+
+    fig.update_xaxes(tickfont=dict(size=11), row=2, col=1)
+    fig.update_yaxes(title_text="Sharpe", gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"),
+                     zeroline=True, zerolinecolor="#B4B2A9", row=2, col=1)
+
+    # ── Panel 3: win rate lines ───────────────────────────────────────────
+    w0_col = f"win_{H0}y"
+    w1_col = f"win_{H1}y"
+
+    for col, label, color, dash in [
+        (w0_col, f"{H0}y win rate", "#378ADD", "solid"),
+        (w1_col, f"{H1}y win rate", "#BA7517", "dash"),
+    ]:
+        if col in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df[col],
+                mode="lines+markers",
+                name=label,
+                line=dict(color=color, width=2, dash=dash),
+                marker=dict(size=7),
+                hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y:.1%}}<extra></extra>",
+            ), row=3, col=1)
+
+    # 50% reference line
+    fig.add_hline(y=0.5, row=3, col=1,
+                  line=dict(color="#B4B2A9", width=0.8, dash="dot"),
+                  annotation=dict(text="50%", font=dict(size=9, color="#888780")))
+
+    fig.update_xaxes(tickfont=dict(size=11), row=3, col=1)
+    fig.update_yaxes(title_text="Win rate", tickformat=".0%",
+                     gridcolor="#D3D1C7",
+                     tickfont=dict(size=10, color="#888780"),
+                     range=[0, 1], row=3, col=1)
+
+    # ── summary annotation ────────────────────────────────────────────────
+    df["combined_score"] = pd.to_numeric(df["combined_score"], errors="coerce")
+    top3    = df.nlargest(3, "combined_score")
+    avoid3  = df.nsmallest(3, "combined_score")
+    top_str = ", ".join(top3.index.tolist())
+    avd_str = ", ".join(avoid3.index.tolist())
+
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.01, y=0.99,
+        text=(
+            f"<b>{symbol}  ·  {period}  ·  "
+            f"{H0}y & {H1}y holds</b><br>"
+            f"Best entry: {top_str}<br>"
+            f"Worst entry: {avd_str}"
+        ),
+        showarrow=False, align="left",
+        font=dict(size=10, color="#5F5E5A"),
+        bgcolor="rgba(255,255,255,0.90)",
+        bordercolor="#D3D1C7", borderwidth=0.5, borderpad=8,
+    )
+
+    _apply_layout(
+        fig,
+        title=f"{symbol} — Seasonal Entry Score",
+        subtitle=(
+            f"Score = Sharpe × reliability  ·  "
+            f"green = buy  ·  red = avoid  ·  "
+            f"period {period}"
+        ),
+    )
+    fig.update_layout(
+        height=750,
+        barmode="group",
+        legend=dict(orientation="h", yanchor="bottom", y=1.01,
+                    xanchor="right", x=1, font=dict(size=11)),
+    )
+    return fig

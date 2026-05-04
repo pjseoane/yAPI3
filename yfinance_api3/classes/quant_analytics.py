@@ -384,10 +384,10 @@ class QuantAnalytics:
 
         weights must sum to 1.0.
         """
-        weights_arr = np.array(weights)
-        assert abs(weights_arr.sum() - 1.0) < 1e-6, "Weights must sum to 1"
+        weights = np.array(weights)
+        assert abs(weights.sum() - 1.0) < 1e-6, "Weights must sum to 1"
         rets = self.returns_bulk(symbols, period).mean()
-        return float((rets @ weights_arr) * self.trading_days)
+        return float((rets @ weights) * self.trading_days)
 
     def portfolio_volatility(
         self,
@@ -396,9 +396,9 @@ class QuantAnalytics:
         period: str = "1y",
     ) -> float:
         """Annualised portfolio volatility given weights."""
-        weights_arr = np.array(weights)
+        weights = np.array(weights)
         cov = self.covariance_matrix(symbols, period)
-        variance = weights_arr @ cov.values @ weights_arr
+        variance = weights @ cov.values @ weights
         return float(np.sqrt(variance))
 
     def portfolio_sharpe(
@@ -853,6 +853,445 @@ class QuantAnalytics:
     # Seasonality
     # ------------------------------------------------------------------
 
+    def seasonality_holding_sharpe(
+        self,
+        symbol:         str,
+        period:         str       = "15y",
+        holding_years:  list[int] = None,
+        risk_free_rate: float     = 0.0,
+    ) -> pd.DataFrame:
+        """
+        Buy-and-hold Sharpe for each calendar month across multiple holding periods.
+
+        For each month M and holding period H:
+          1. Find every historical entry point in month M
+          2. Compute total return H years later
+          3. Sharpe = mean(returns) / std(returns) — annualised
+
+        This answers: "If I buy every January and hold 2 years,
+        what is my expected risk-adjusted return?"
+
+        Comparing 2y vs 5y holding periods reveals:
+          2y Sharpe > 5y : better short-term seasonal momentum
+          5y Sharpe > 2y : patience rewarded, noise washes out
+          Both high       : strong entry point regardless of horizon
+          Both low        : no persistent edge from that month
+
+        Parameters
+        ----------
+        symbol        : ticker
+        period        : history window to fetch (default "15y")
+        holding_years : list of holding periods in years (default [2, 5])
+        risk_free_rate: annual risk-free rate (default 0.0)
+
+        Returns
+        -------
+        DataFrame — one row per month (Jan-Dec), columns:
+          sharpe_{H}y   : annualised Sharpe of H-year holds entered this month
+          mean_{H}y     : mean total return over H years
+          std_{H}y      : std of total returns
+          win_rate_{H}y : % of entries profitable after H years
+          n_{H}y        : number of entry points with full H-year history
+          trend         : "patient" | "momentum" | "consistent" | "weak" | "n/a"
+                          compares short vs long holding Sharpe
+
+        Example
+        -------
+        df = qa.seasonality_holding_sharpe("SPY", period="15y", holding_years=[2, 5])
+        print(df.sort_values("sharpe_2y", ascending=False))
+        # → best month to buy for a 2-year hold
+        """
+        import numpy as np
+
+        if holding_years is None:
+            holding_years = [2, 5]
+
+        prices = self._prices(symbol, period)
+        # use month-end prices
+        monthly = prices.resample("ME").last().dropna()
+
+        month_names = {
+            1:"Jan", 2:"Feb", 3:"Mar",  4:"Apr",  5:"May",  6:"Jun",
+            7:"Jul", 8:"Aug", 9:"Sep", 10:"Oct", 11:"Nov", 12:"Dec"
+        }
+
+        rows = {}
+        for month_num in range(1, 13):
+            month_label = month_names[month_num]
+            # all month-end dates in this calendar month
+            entry_dates = monthly[monthly.index.month == month_num].index
+            row = {}
+            sharpes = []
+
+            for H in holding_years:
+                H_months = H * 12
+                returns  = []
+
+                for entry in entry_dates:
+                    # exit date: H years later (same month)
+                    exit_idx = monthly.index.get_loc(entry) + H_months
+                    if exit_idx >= len(monthly):
+                        continue   # no full history yet
+                    p_entry = float(monthly.iloc[monthly.index.get_loc(entry)])
+                    p_exit  = float(monthly.iloc[exit_idx])
+                    total_return = (p_exit / p_entry) - 1.0
+                    # annualise
+                    ann_return = (1 + total_return) ** (1/H) - 1
+                    returns.append(ann_return)
+
+                n = len(returns)
+                if n < 2:
+                    row[f"sharpe_{H}y"]   = float("nan")
+                    row[f"mean_{H}y"]     = float("nan")
+                    row[f"std_{H}y"]      = float("nan")
+                    row[f"win_{H}y"]      = float("nan")
+                    row[f"n_{H}y"]        = n
+                    sharpes.append(float("nan"))
+                    continue
+
+                arr    = np.array(returns)
+                rf_ann = risk_free_rate
+                excess = arr - rf_ann
+                mean_e = float(excess.mean())
+                std_e  = float(arr.std(ddof=1))
+                sharpe = round(mean_e / std_e, 3) if std_e > 0 else 0.0
+
+                row[f"sharpe_{H}y"] = sharpe
+                row[f"mean_{H}y"]   = round(float(arr.mean()), 4)
+                row[f"std_{H}y"]    = round(float(arr.std(ddof=1)), 4)
+                row[f"win_{H}y"]    = round(float((arr > 0).mean()), 3)
+                row[f"n_{H}y"]      = n
+                sharpes.append(sharpe)
+
+            # trend: short hold vs long hold
+            valid = [s for s in sharpes if s == s]  # remove nan
+            if len(valid) >= 2:
+                short_sharpe = sharpes[0]
+                long_sharpe  = sharpes[-1]
+                if short_sharpe > long_sharpe + 0.3:
+                    row["edge"] = "momentum"      # better short-term
+                elif long_sharpe > short_sharpe + 0.3:
+                    row["edge"] = "patient"       # better long-term
+                elif valid[0] > 0.5 and valid[-1] > 0.5:
+                    row["edge"] = "consistent"    # both strong
+                else:
+                    row["edge"] = "weak"
+            else:
+                row["edge"] = "n/a"
+
+            rows[month_label] = row
+
+        df = pd.DataFrame(rows).T
+        df.index.name = "entry_month"
+
+        # order columns
+        cols = []
+        for H in holding_years:
+            cols += [f"sharpe_{H}y", f"mean_{H}y", f"std_{H}y",
+                     f"win_{H}y", f"n_{H}y"]
+        cols.append("edge")
+        df = df[[c for c in cols if c in df.columns]]
+
+        return df
+
+
+    def seasonality_holding_drawdown(
+        self,
+        symbol:        str,
+        period:        str       = "15y",
+        holding_years: list[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Maximum drawdown during hold period for each entry month.
+
+        For each calendar month and holding period, measures the worst
+        peak-to-trough decline experienced DURING the hold — not just
+        the final return. This is the "stomach test": can you hold
+        through the worst drawdown to reach the final return?
+
+        Returns
+        -------
+        DataFrame — one row per month, columns:
+          max_dd_{H}y   : average max drawdown during H-year hold
+          worst_dd_{H}y : worst single max drawdown experienced
+          recovery_{H}y : % of entries that recovered to positive by exit
+          pain_ratio_{H}y: mean_return / abs(mean_max_dd) — reward/pain
+        """
+        import numpy as np
+
+        if holding_years is None:
+            holding_years = [2, 5]
+
+        prices  = self._prices(symbol, period)
+        monthly = prices.resample("ME").last().dropna()
+
+        month_names = {
+            1:"Jan", 2:"Feb", 3:"Mar",  4:"Apr",  5:"May",  6:"Jun",
+            7:"Jul", 8:"Aug", 9:"Sep", 10:"Oct", 11:"Nov", 12:"Dec"
+        }
+
+        rows = {}
+        for month_num in range(1, 13):
+            month_label  = month_names[month_num]
+            entry_dates  = monthly[monthly.index.month == month_num].index
+            row = {}
+
+            for H in holding_years:
+                H_months    = H * 12
+                max_dds     = []
+                final_rets  = []
+
+                for entry in entry_dates:
+                    i_entry = monthly.index.get_loc(entry)
+                    i_exit  = i_entry + H_months
+                    if i_exit >= len(monthly):
+                        continue
+
+                    hold_prices = monthly.iloc[i_entry:i_exit + 1].values
+                    p0          = hold_prices[0]
+                    # running max and drawdown
+                    running_max = np.maximum.accumulate(hold_prices)
+                    dd          = (hold_prices - running_max) / running_max
+                    max_dd      = float(dd.min())
+                    final_ret   = (hold_prices[-1] / p0) - 1.0
+
+                    max_dds.append(max_dd)
+                    final_rets.append(final_ret)
+
+                n = len(max_dds)
+                if n == 0:
+                    for k in [f"max_dd_{H}y", f"worst_dd_{H}y",
+                               f"recovery_{H}y", f"pain_ratio_{H}y"]:
+                        row[k] = float("nan")
+                    continue
+
+                arr_dd   = np.array(max_dds)
+                arr_ret  = np.array(final_rets)
+                mean_dd  = float(arr_dd.mean())
+                pain     = round(float(arr_ret.mean()) / abs(mean_dd), 3)                            if mean_dd != 0 else float("nan")
+
+                row[f"max_dd_{H}y"]     = round(mean_dd, 4)
+                row[f"worst_dd_{H}y"]   = round(float(arr_dd.min()), 4)
+                row[f"recovery_{H}y"]   = round(float((arr_ret > 0).mean()), 3)
+                row[f"pain_ratio_{H}y"] = pain
+
+            rows[month_label] = row
+
+        df = pd.DataFrame(rows).T
+        df.index.name = "entry_month"
+        cols = []
+        for H in holding_years:
+            cols += [f"max_dd_{H}y", f"worst_dd_{H}y",
+                     f"recovery_{H}y", f"pain_ratio_{H}y"]
+        return df[[c for c in cols if c in df.columns]]
+
+    def seasonality_decade_analysis(
+        self,
+        symbol:        str,
+        period:        str = "30y",
+        holding_years: int = 1,
+    ) -> pd.DataFrame:
+        """
+        Hit rate and mean return per entry month broken down by decade.
+
+        Answers: "Was January strong in 2000-2010? What about 2010-2020?
+        Is the pattern consistent across decades or regime-dependent?"
+
+        Returns
+        -------
+        DataFrame — MultiIndex (decade, month), columns:
+          mean_return, win_rate, n_obs, sharpe
+        """
+        import numpy as np
+
+        prices  = self._prices(symbol, period)
+        monthly = prices.resample("ME").last().dropna()
+
+        month_names = {
+            1:"Jan", 2:"Feb", 3:"Mar",  4:"Apr",  5:"May",  6:"Jun",
+            7:"Jul", 8:"Aug", 9:"Sep", 10:"Oct", 11:"Nov", 12:"Dec"
+        }
+
+        H_months = holding_years * 12
+        rows = []
+
+        for month_num in range(1, 13):
+            month_label = month_names[month_num]
+            entry_dates = monthly[monthly.index.month == month_num].index
+
+            for entry in entry_dates:
+                i_entry = monthly.index.get_loc(entry)
+                i_exit  = i_entry + H_months
+                if i_exit >= len(monthly):
+                    continue
+                p_entry = float(monthly.iloc[i_entry])
+                p_exit  = float(monthly.iloc[i_exit])
+                ret     = (p_exit / p_entry) ** (1/holding_years) - 1
+                year    = entry.year
+                decade  = f"{(year // 10) * 10}s"
+                rows.append({"decade": decade, "month": month_label,
+                             "return": ret, "year": year})
+
+        df_raw = pd.DataFrame(rows)
+        if df_raw.empty:
+            return pd.DataFrame()
+
+        result = (df_raw.groupby(["decade","month"])["return"]
+                  .agg(
+                      mean_return = "mean",
+                      std_return  = "std",
+                      win_rate    = lambda x: (x > 0).mean(),
+                      n_obs       = "count",
+                  )
+                  .round(4))
+
+        result["sharpe"] = (result["mean_return"] /
+                            result["std_return"].replace(0, float("nan"))).round(3)
+
+        # reindex to natural month order
+        month_order  = list(month_names.values())
+        decade_order = sorted(df_raw["decade"].unique())
+        result = result.reindex(
+            pd.MultiIndex.from_product([decade_order, month_order],
+                                       names=["decade","month"])
+        ).dropna(how="all")
+
+        return result
+
+    def seasonality_cross_asset(
+        self,
+        symbols:       list[str],
+        period:        str       = "10y",
+        holding_years: list[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Compare holding-period Sharpe across multiple assets for each month.
+
+        Ranks assets by their seasonal entry-point quality, making it easy
+        to identify which asset has the strongest seasonal signal for each
+        calendar month.
+
+        Returns
+        -------
+        DataFrame — one row per month, one column group per asset:
+          {symbol}_sharpe_{H}y, {symbol}_win_{H}y
+        Plus a "best_asset_{H}y" column showing the top-ranked asset.
+        """
+        if holding_years is None:
+            holding_years = [2, 5]
+
+        results = {}
+        for sym in symbols:
+            try:
+                df = self.seasonality_holding_sharpe(
+                    sym, period=period, holding_years=holding_years
+                )
+                results[sym] = df
+            except Exception as e:
+                print(f"Skipping {sym}: {e}")
+
+        if not results:
+            return pd.DataFrame()
+
+        # combine into one wide DataFrame
+        month_names = ["Jan","Feb","Mar","Apr","May","Jun",
+                       "Jul","Aug","Sep","Oct","Nov","Dec"]
+        combined = pd.DataFrame(index=month_names)
+        combined.index.name = "entry_month"
+
+        for sym, df in results.items():
+            for H in holding_years:
+                col_s = f"sharpe_{H}y"
+                col_w = f"win_{H}y"
+                if col_s in df.columns:
+                    combined[f"{sym}_{col_s}"] = df.reindex(month_names)[col_s]
+                if col_w in df.columns:
+                    combined[f"{sym}_{col_w}"] = df.reindex(month_names)[col_w]
+
+        # best asset per month per holding period
+        for H in holding_years:
+            sharpe_cols = [f"{sym}_sharpe_{H}y" for sym in results]
+            avail       = [c for c in sharpe_cols if c in combined.columns]
+            if avail:
+                combined[f"best_{H}y"] = (
+                    combined[avail]
+                    .idxmax(axis=1)
+                    .str.replace(f"_sharpe_{H}y", "", regex=False)
+                )
+
+        return combined.round(4)
+
+    def seasonality_combined_score(
+        self,
+        symbol:        str,
+        period:        str       = "15y",
+        holding_years: list[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Combined actionable score per entry month.
+
+        Aggregates all seasonal signals into one ranked score:
+          score = (sharpe_2y × 0.3 + sharpe_5y × 0.3 +
+                   win_rate_2y × 0.2 + win_rate_5y × 0.2) ×
+                  reliability_score
+
+        Multiplying by reliability_score penalises months with
+        few observations — a great Sharpe on 3 data points is
+        less trustworthy than a moderate Sharpe on 15 points.
+
+        Returns
+        -------
+        DataFrame sorted by combined_score descending, columns:
+          sharpe_2y, sharpe_5y, win_2y, win_5y,
+          reliability_score, combined_score, rank, signal
+        """
+        if holding_years is None:
+            holding_years = [2, 5]
+
+        # holding Sharpe
+        hs = self.seasonality_holding_sharpe(
+            symbol, period=period, holding_years=holding_years
+        )
+        # reliability from monthly seasonality
+        try:
+            pivot = self.monthly_seasonality(symbol, period=period)
+            stats = self.seasonality_stats(pivot)
+            hs["reliability_score"] = stats.reindex(hs.index)["reliability_score"]
+        except Exception:
+            hs["reliability_score"] = 0.5
+
+        import numpy as np
+
+        H0, H1 = holding_years[0], holding_years[-1]
+        s0 = hs.get(f"sharpe_{H0}y", 0).fillna(0)
+        s1 = hs.get(f"sharpe_{H1}y", 0).fillna(0)
+        w0 = hs.get(f"win_{H0}y",    0).fillna(0)
+        w1 = hs.get(f"win_{H1}y",    0).fillna(0)
+        rs = hs.get("reliability_score", 0.5).fillna(0.5)
+
+        raw_score = (s0 * 0.30 + s1 * 0.30 +
+                     w0 * 0.20 + w1 * 0.20)
+        combined  = (raw_score * rs).round(4)
+
+        out = pd.DataFrame({
+            f"sharpe_{H0}y": s0,
+            f"sharpe_{H1}y": s1,
+            f"win_{H0}y":    w0,
+            f"win_{H1}y":    w1,
+            "reliability":   rs,
+            "combined_score": combined,
+        })
+        out["rank"]   = out["combined_score"].rank(ascending=False).astype(int)
+        out["signal"] = out["combined_score"].apply(
+            lambda x: "strong buy" if x > 0.6  else
+                      "buy"        if x > 0.3  else
+                      "neutral"    if x > -0.1 else
+                      "avoid"
+        )
+        out.index.name = "entry_month"
+        return out.sort_values("combined_score", ascending=False)
+
+
     def weekly_seasonality(
         self,
         symbol: str,
@@ -978,7 +1417,10 @@ class QuantAnalytics:
           best_year   : year of the best return
           worst_year  : year of the worst return
           sharpe      : mean / std (risk-adjusted seasonal edge)
-          reliability : "high" (n>=7), "medium" (n>=3), "low" (n<3)
+          reliability_score : composite score 0-1 (sortable)
+          reliability       : "high" (>=0.65), "medium" (>=0.35), "low" (<0.35)
+                              Combines: sample size (40%) + directional
+                              consistency (40%) + Sharpe (20%) - skew penalty
 
         Example
         -------
@@ -994,19 +1436,71 @@ class QuantAnalytics:
             n = len(row_data)
             mean   = float(row_data.mean())
             std    = float(row_data.std()) if n > 1 else 0.0
+            win_rate     = float((row_data > 0).mean())
+            skew         = float(row_data.skew()) if n > 2 else 0.0
+            sharpe       = round(mean / std, 3) if std > 0 else 0.0
+
+            # ── reliability score (0-1) ───────────────────────────────────
+            # Combines three independent dimensions:
+            #
+            # 1. size_score (40%) — sample size confidence
+            #    More years = tighter confidence interval on the mean.
+            #    Saturates at 10 years (diminishing returns beyond that).
+            #
+            # 2. consistency_score (40%) — directional consistency
+            #    win_rate=1.0 or 0.0 → score=1.0 (always same direction)
+            #    win_rate=0.5       → score=0.0 (random, no edge)
+            #    Formula: |win_rate - 0.5| × 2 maps [0.5,1] → [0,1]
+            #
+            # 3. sharpe_score (20%) — risk-adjusted magnitude
+            #    High Sharpe = consistent edge relative to noise.
+            #    Saturates at Sharpe=2 (very strong seasonal signal).
+            #
+            # Skew penalty: negative skew (fat left tail) reduces score
+            # because even a consistent positive return can be wiped out
+            # by a single bad year with a large negative outlier.
+            #
+            # Final labels:
+            #   >= 0.65 → "high"    (strong, consistent, well-sampled)
+            #   >= 0.35 → "medium"  (some edge but uncertainty remains)
+            #   <  0.35 → "low"     (unreliable, small sample or random)
+
+            size_score        = min(n / 10.0, 1.0)
+            consistency_score = abs(win_rate - 0.5) * 2.0
+            sharpe_score      = min(abs(sharpe) / 2.0, 1.0)
+
+            # skew penalty: negative skew up to -0.15 reduction
+            skew_penalty = max(min(-skew * 0.05, 0.15), 0.0) if n > 2 else 0.0
+
+            rel_score = (
+                size_score        * 0.40 +
+                consistency_score * 0.40 +
+                sharpe_score      * 0.20
+            ) - skew_penalty
+
+            rel_score = round(max(min(rel_score, 1.0), 0.0), 3)
+
+            if rel_score >= 0.65:
+                rel_label = "high"
+            elif rel_score >= 0.35:
+                rel_label = "medium"
+            else:
+                rel_label = "low"
+
             rows[period_label] = {
-                "mean":       mean,
-                "median":     float(row_data.median()),
-                "std":        std,
-                "min":        float(row_data.min()),
-                "max":        float(row_data.max()),
-                "win_rate":   float((row_data > 0).mean()),
-                "n_obs":      n,
-                "skew":       float(row_data.skew()) if n > 2 else 0.0,
-                "best_year":  int(row_data.idxmax()),
-                "worst_year": int(row_data.idxmin()),
-                "sharpe":     round(mean / std, 3) if std > 0 else 0.0,
-                "reliability": "high" if n >= 7 else "medium" if n >= 3 else "low",
+                "mean":              mean,
+                "median":            float(row_data.median()),
+                "std":               std,
+                "min":               float(row_data.min()),
+                "max":               float(row_data.max()),
+                "win_rate":          win_rate,
+                "n_obs":             n,
+                "skew":              skew,
+                "best_year":         int(row_data.idxmax()),
+                "worst_year":        int(row_data.idxmin()),
+                "sharpe":            sharpe,
+                "reliability_score": rel_score,
+                "reliability":       rel_label,
             }
         df = pd.DataFrame(rows).T
         df.index.name = pivot.index.name
@@ -1538,3 +2032,4 @@ class QuantAnalytics:
         combined.index = combined.index + 1
         combined.index.name = "rank"
         return combined
+
