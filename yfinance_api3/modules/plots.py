@@ -25,6 +25,7 @@ Positions  : positions_book, portfolio_summary
 from __future__ import annotations
 
 from collections.abc import Callable
+from itertools import cycle
 
 import pandas as pd
 import numpy as np
@@ -235,7 +236,7 @@ def scatter(
     fig.add_vline(x=bx, line=dict(color="#5F5E5A", width=1, dash="dash"))
 
     # symbols
-    for (sym, vals), color in zip(data.items(), _PALETTE):
+    for (sym, vals), color in zip(data.items(), cycle(_PALETTE)):
         fig.add_trace(go.Scatter(
             x=[vals["sx"]], y=[vals["sy"]],
             mode="markers+text",
@@ -272,6 +273,319 @@ def scatter(
                   subtitle=f"benchmark: {benchmark}  ·  risk-free rate {risk_free_rate:.0%}")
     fig.update_xaxes(range=[lo, hi], title_text=f"{label} — {label_x}")
     fig.update_yaxes(range=[lo, hi], title_text=f"{label} — {label_y}")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 1b. Scatter quadrant classification
+# ---------------------------------------------------------------------------
+
+def scatter_quadrants(
+    quant: QuantAnalytics,
+    symbols: list[str],
+    metric: str | Callable = "sharpe",
+    period_x: str = "2y",
+    period_y: str = "5y",
+    benchmark: str = "SPY",
+    risk_free_rate: float = 0.05,
+    metric_label: str | None = None,
+) -> pd.DataFrame:
+    """
+    Classify symbols into quadrants relative to the benchmark, matching
+    the scatter() chart exactly.
+
+    Quadrant definition (counter-clockwise from top-right):
+    --------------------------------------------------------
+    Q1  top-right    beats benchmark on BOTH periods     → "Leaders"
+    Q2  top-left     beats on period_y only              → "Improving"
+    Q3  bottom-left  lags benchmark on BOTH periods      → "Laggards"
+    Q4  bottom-right beats on period_x only              → "Deteriorating"
+
+    Axes
+    ----
+    x-axis = period_x (shorter / more recent window by convention)
+    y-axis = period_y (longer window)
+
+    Parameters
+    ----------
+    quant          : QuantAnalytics instance
+    symbols        : list of tickers to classify
+    metric         : built-in metric name or custom callable
+    period_x       : x-axis period (default "2y")
+    period_y       : y-axis period (default "5y")
+    benchmark      : benchmark ticker (default "SPY")
+    risk_free_rate : annual risk-free rate (default 0.05)
+    metric_label   : label override when passing a custom callable
+
+    Returns
+    -------
+    DataFrame with columns:
+        symbol, metric_x, metric_y, benchmark_x, benchmark_y,
+        excess_x, excess_y, quadrant (1-4), quadrant_label, quadrant_desc
+    sorted by quadrant then excess_y descending.
+    """
+    fn, label = _resolve_metric(metric, metric_label)
+
+    # benchmark values
+    try:
+        bx = fn(quant, benchmark, period_x, risk_free_rate)
+        by = fn(quant, benchmark, period_y, risk_free_rate)
+    except Exception as e:
+        raise ValueError(f"Could not fetch benchmark '{benchmark}': {e}")
+
+    _QUAD_LABELS = {
+        1: ("Q1", "Leaders",      f"Beats {benchmark} — both periods"),
+        2: ("Q2", "Improving",    f"Beats {benchmark} — {period_y} only"),
+        3: ("Q3", "Laggards",     f"Lags {benchmark}  — both periods"),
+        4: ("Q4", "Deteriorating",f"Beats {benchmark} — {period_x} only"),
+    }
+
+    def _classify(sx: float, sy: float) -> int:
+        beat_x = sx >= bx
+        beat_y = sy >= by
+        if beat_x and beat_y:
+            return 1   # top-right
+        if not beat_x and beat_y:
+            return 2   # top-left
+        if not beat_x and not beat_y:
+            return 3   # bottom-left
+        return 4       # bottom-right (beat_x and not beat_y)
+
+    rows = []
+    for sym in symbols:
+        if sym.upper() == benchmark.upper():
+            continue
+        try:
+            sx = fn(quant, sym, period_x, risk_free_rate)
+            sy = fn(quant, sym, period_y, risk_free_rate)
+        except Exception as e:
+            print(f"Skipping {sym}: {e}")
+            continue
+
+        q = _classify(sx, sy)
+        q_num, q_label, q_desc = _QUAD_LABELS[q]
+        rows.append({
+            "symbol":        sym,
+            f"{label}_{period_x}": round(sx, 4),
+            f"{label}_{period_y}": round(sy, 4),
+            f"benchmark_{period_x}": round(bx, 4),
+            f"benchmark_{period_y}": round(by, 4),
+            f"excess_{period_x}":    round(sx - bx, 4),
+            f"excess_{period_y}":    round(sy - by, 4),
+            "quadrant":       q,
+            "quadrant_label": q_label,
+            "quadrant_desc":  q_desc,
+        })
+
+    if not rows:
+        raise ValueError("No data could be fetched for any symbol.")
+
+    df = pd.DataFrame(rows)
+
+    # ── Composite score ────────────────────────────────────────────────
+    # Euclidean distance from benchmark pivot (excess_x, excess_y),
+    # signed by quadrant direction:
+    #   Q1 (+, +) → fully positive   Q3 (-, -) → fully negative
+    #   Q2 (-, +) → sign from period_y (longer window weighted more)
+    #   Q4 (+, -) → sign from period_y (longer window weighted more)
+    #
+    # weight_y > weight_x reflects that the longer window is more
+    # structurally meaningful than the shorter one.
+    weight_x = 0.4
+    weight_y = 0.6
+
+    ex = df[f"excess_{period_x}"]
+    ey = df[f"excess_{period_y}"]
+
+    distance = np.sqrt((ex * weight_x) ** 2 + (ey * weight_y) ** 2)
+
+    # sign: weighted dot product of excess vector vs (+1,+1) direction
+    # positive = trending toward Q1, negative = trending toward Q3
+    sign = np.sign(ex * weight_x + ey * weight_y).replace(0, 1)
+
+    df["score"] = (sign * distance).round(4)
+
+    df = (df.sort_values("score", ascending=False)
+            .reset_index(drop=True))
+
+    # rank 1 = best
+    df.insert(1, "rank", range(1, len(df) + 1))
+
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 1c. Scatter — zoom into one quadrant
+# ---------------------------------------------------------------------------
+
+def scatter_zoom(
+    quant: QuantAnalytics,
+    symbols: list[str],
+    quadrant: int,
+    metric: str | Callable = "sharpe",
+    period_x: str = "2y",
+    period_y: str = "5y",
+    benchmark: str = "SPY",
+    risk_free_rate: float = 0.05,
+    metric_label: str | None = None,
+) -> go.Figure:
+    """
+    Same as scatter() but zoomed into a single quadrant.
+
+    Only symbols belonging to that quadrant are plotted as full markers.
+    Symbols from other quadrants appear as dimmed ghost markers for context.
+    The benchmark crosshair is always shown at the quadrant boundary.
+
+    Quadrant numbering (counter-clockwise from top-right):
+    -------------------------------------------------------
+    1  top-right    beats benchmark on BOTH periods   → Leaders
+    2  top-left     beats on period_y only            → Improving
+    3  bottom-left  lags benchmark on BOTH periods    → Laggards
+    4  bottom-right beats on period_x only            → Deteriorating
+
+    Parameters
+    ----------
+    quadrant : int 1–4
+    All other parameters identical to scatter().
+    """
+    if quadrant not in (1, 2, 3, 4):
+        raise ValueError("quadrant must be 1, 2, 3, or 4")
+
+    fn, label = _resolve_metric(metric, metric_label)
+    label_x   = _period_label(period_x)
+    label_y   = _period_label(period_y)
+
+    _QUAD_META = {
+        1: ("Leaders",       "Beat benchmark — both periods",    "rgba(29,158,117,0.12)"),
+        2: ("Improving",     f"Beat benchmark — {period_y} only","rgba(55,138,221,0.10)"),
+        3: ("Laggards",      "Lag benchmark — both periods",     "rgba(226,75,74,0.12)"),
+        4: ("Deteriorating", f"Beat benchmark — {period_x} only","rgba(186,117,23,0.10)"),
+    }
+    q_name, q_desc, q_fill = _QUAD_META[quadrant]
+
+    # benchmark pivot
+    try:
+        bx = fn(quant, benchmark, period_x, risk_free_rate)
+        by = fn(quant, benchmark, period_y, risk_free_rate)
+    except Exception as e:
+        raise ValueError(f"Could not fetch benchmark '{benchmark}': {e}")
+
+    def _quad_of(sx, sy):
+        if sx >= bx and sy >= by: return 1
+        if sx <  bx and sy >= by: return 2
+        if sx <  bx and sy <  by: return 3
+        return 4
+
+    # fetch all symbols
+    all_data   = {}
+    focus_data = {}
+    for sym in symbols:
+        if sym.upper() == benchmark.upper():
+            continue
+        try:
+            sx = fn(quant, sym, period_x, risk_free_rate)
+            sy = fn(quant, sym, period_y, risk_free_rate)
+            all_data[sym] = {"sx": sx, "sy": sy}
+            if _quad_of(sx, sy) == quadrant:
+                focus_data[sym] = {"sx": sx, "sy": sy}
+        except Exception as e:
+            print(f"Skipping {sym}: {e}")
+
+    if not focus_data:
+        fig = go.Figure()
+        fig.add_annotation(
+            text=f"No symbols in Q{quadrant} ({q_name})",
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            showarrow=False, font=dict(size=14, color="#666666"),
+        )
+        _apply_layout(fig,
+                      title=f"Q{quadrant} Zoom — {label}: {label_x} vs {label_y}",
+                      subtitle=q_desc)
+        return fig
+
+    # axis range: tight around focus symbols + small padding
+    pad = 0.20
+    xs  = [v["sx"] for v in focus_data.values()]
+    ys  = [v["sy"] for v in focus_data.values()]
+
+    if quadrant == 1:
+        x_lo, x_hi = bx - pad, max(xs) + pad
+        y_lo, y_hi = by - pad, max(ys) + pad
+    elif quadrant == 2:
+        x_lo, x_hi = min(xs) - pad, bx + pad
+        y_lo, y_hi = by - pad, max(ys) + pad
+    elif quadrant == 3:
+        x_lo, x_hi = min(xs) - pad, bx + pad
+        y_lo, y_hi = min(ys) - pad, by + pad
+    else:  # Q4
+        x_lo, x_hi = bx - pad, max(xs) + pad
+        y_lo, y_hi = min(ys) - pad, by + pad
+
+    fig = go.Figure()
+
+    # quadrant background fill
+    fig.add_shape(
+        type="rect",
+        x0=x_lo, x1=x_hi, y0=y_lo, y1=y_hi,
+        fillcolor=q_fill, line_width=0, layer="below",
+    )
+
+    # ghost markers — other quadrant symbols dimmed for spatial context
+    ghost_x, ghost_y, ghost_text = [], [], []
+    for sym, vals in all_data.items():
+        if sym not in focus_data:
+            ghost_x.append(vals["sx"])
+            ghost_y.append(vals["sy"])
+            ghost_text.append(sym)
+    if ghost_x:
+        fig.add_trace(go.Scatter(
+            x=ghost_x, y=ghost_y,
+            mode="markers+text",
+            marker=dict(size=7, color="#2A2A2A",
+                        line=dict(color="#3A3A3A", width=1)),
+            text=ghost_text, textposition="top right",
+            textfont=dict(size=9, color="#3A3A3A"),
+            name="Other quadrants",
+            hoverinfo="skip",
+            showlegend=True,
+        ))
+
+    # benchmark crosshair
+    fig.add_hline(y=by, line=dict(color="#5F5E5A", width=1, dash="dash"))
+    fig.add_vline(x=bx, line=dict(color="#5F5E5A", width=1, dash="dash"))
+
+    # pivot label
+    fig.add_annotation(
+        x=bx, y=by, text=f"  {benchmark} pivot",
+        showarrow=False, xanchor="left",
+        font=dict(size=10, color="#5F5E5A"),
+    )
+
+    # focus symbols — full color + larger markers
+    for (sym, vals), color in zip(focus_data.items(), cycle(_PALETTE)):
+        fig.add_trace(go.Scatter(
+            x=[vals["sx"]], y=[vals["sy"]],
+            mode="markers+text",
+            marker=dict(size=13, color=color,
+                        line=dict(color="white", width=0.8)),
+            text=[sym], textposition="top right",
+            textfont=dict(size=11, color=color),
+            name=sym,
+            customdata=[[sym, vals["sx"], vals["sy"]]],
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                f"{label} ({label_x}): %{{customdata[1]:.3f}}<br>"
+                f"{label} ({label_y}): %{{customdata[2]:.3f}}<extra></extra>"
+            ),
+        ))
+
+    _apply_layout(
+        fig,
+        title=f"Q{quadrant} Zoom — {label}: {label_x} vs {label_y}",
+        subtitle=f"{q_name}  ·  {q_desc}  ·  {len(focus_data)} stocks",
+    )
+    fig.update_xaxes(range=[x_lo, x_hi], title_text=f"{label} — {label_x}")
+    fig.update_yaxes(range=[y_lo, y_hi], title_text=f"{label} — {label_y}")
     return fig
 
 
@@ -462,6 +776,215 @@ def correlation_heatmap(
     fig.update_yaxes(tickfont=dict(size=10))
     _apply_layout(fig, title=f"Return correlation — {_period_label(period)}")
     fig.update_layout(width=600, height=520)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 6b. Correlation deduplication — analysis + heatmap
+# ---------------------------------------------------------------------------
+
+def correlation_dedup(
+    quant: QuantAnalytics,
+    symbols: list[str],
+    period: str = "1y",
+    threshold: float = 0.75,
+    method: str = "score",
+    scores=None,
+) -> dict:
+    """
+    Remove redundant stocks from a list based on pairwise correlation.
+
+    For each pair exceeding *threshold*, one stock is dropped. The
+    survivor is chosen by *method*:
+
+    - "score"  : keep the stock with the higher score (pass a Series/dict
+                 of {symbol: score}, e.g. from scatter_quadrants()).
+                 Falls back to "first" if scores not provided.
+    - "first"  : keep the stock that appeared earlier in *symbols*
+    - "second" : keep the stock that appeared later  in *symbols*
+
+    Algorithm: greedy single-linkage — iterates over correlated pairs
+    sorted by |correlation| descending and drops the loser of each pair.
+
+    Parameters
+    ----------
+    quant     : QuantAnalytics instance
+    symbols   : input list (e.g. Q1 stocks from scatter_quadrants)
+    period    : return window for correlation (default "1y")
+    threshold : drop one stock if |corr| >= threshold (default 0.75)
+    method    : "score" | "first" | "second"
+    scores    : {symbol: float} or pd.Series — higher = better.
+
+    Returns
+    -------
+    dict:
+        kept        : list[str]       — deduplicated symbol list
+        dropped     : list[str]       — removed symbols
+        pairs       : pd.DataFrame    — pairs above threshold with columns
+                      [sym_a, sym_b, correlation, dropped]
+        corr_matrix : pd.DataFrame    — full correlation matrix
+    """
+    corr = quant.correlation_matrix(symbols, period=period)
+
+    score_map = {}
+    if scores is not None:
+        score_map = scores.to_dict() if hasattr(scores, "to_dict") else dict(scores)
+
+    syms = corr.columns.tolist()
+    n    = len(syms)
+
+    # collect all pairs above threshold (upper triangle)
+    pairs = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            c = corr.iloc[i, j]
+            if abs(c) >= threshold:
+                pairs.append((syms[i], syms[j], round(c, 4)))
+
+    # sort by |correlation| descending
+    pairs.sort(key=lambda x: abs(x[2]), reverse=True)
+
+    dropped = set()
+    pair_rows = []
+
+    for a, b, c in pairs:
+        # if both already handled, skip entirely
+        if a in dropped and b in dropped:
+            continue
+        # if one is already dropped, the other is safe — just log and move on
+        if a in dropped or b in dropped:
+            already = a if a in dropped else b
+            pair_rows.append({"sym_a": a, "sym_b": b,
+                               "correlation": c, "dropped": already,
+                               "note": "already dropped"})
+            continue
+
+        # both fresh — keep higher score, drop lower score
+        if method == "score" and score_map:
+            sa = score_map.get(a, 0.0)
+            sb = score_map.get(b, 0.0)
+            loser  = b if sa >= sb else a
+            winner = a if sa >= sb else b
+        elif method == "second":
+            loser, winner = b, a
+        else:
+            loser, winner = a, b
+
+        dropped.add(loser)
+        pair_rows.append({"sym_a": winner, "sym_b": loser,
+                          "correlation": c, "dropped": loser,
+                          "note": ""})
+
+    kept = [s for s in symbols if s not in dropped]
+    pairs_df = (pd.DataFrame(pair_rows) if pair_rows
+                else pd.DataFrame(columns=["sym_a", "sym_b", "correlation", "dropped"]))
+
+    return {
+        "kept":        kept,
+        "dropped":     sorted(dropped),
+        "pairs":       pairs_df,
+        "corr_matrix": corr,
+    }
+
+
+def correlation_dedup_heatmap(
+    quant: QuantAnalytics,
+    symbols: list[str],
+    period: str = "1y",
+    threshold: float = 0.75,
+    method: str = "score",
+    scores=None,
+) -> go.Figure:
+    """
+    Correlation heatmap with redundant stocks visually flagged.
+
+    - Kept stocks: tick labels in green
+    - Dropped stocks: tick labels in red
+    - Cells that triggered a drop: outlined with a white border
+    - Subtitle shows threshold, kept count, dropped names
+
+    All parameters identical to correlation_dedup().
+    """
+    result   = correlation_dedup(quant, symbols, period=period,
+                                 threshold=threshold, method=method,
+                                 scores=scores)
+    corr     = result["corr_matrix"]
+    kept     = set(result["kept"])
+    pairs_df = result["pairs"]
+    syms     = corr.columns.tolist()
+    n        = len(syms)
+
+    text = [[f"{corr.iloc[i, j]:.2f}" for j in range(n)] for i in range(n)]
+    tick_colors = ["#1D9E75" if s in kept else "#E24B4A" for s in syms]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Heatmap(
+        z=corr.values,
+        x=syms, y=syms,
+        zmin=-1, zmax=1,
+        colorscale="RdYlGn",
+        text=text,
+        texttemplate="%{text}",
+        textfont=dict(size=10),
+        hovertemplate="<b>%{y} / %{x}</b><br>Correlation: %{z:.3f}<extra></extra>",
+        colorbar=dict(
+            thickness=12, len=0.8,
+            tickfont=dict(size=10, color="#888888"),
+            outlinewidth=0,
+            title=dict(text="rho", font=dict(size=12, color="#888888")),
+        ),
+    ))
+
+    # outline cells that triggered a drop
+    triggered = set()
+    if not pairs_df.empty:
+        for _, row in pairs_df.iterrows():
+            if abs(row["correlation"]) >= threshold:
+                triggered.add((row["sym_a"], row["sym_b"]))
+                triggered.add((row["sym_b"], row["sym_a"]))
+
+    for (sa, sb) in triggered:
+        if sa in syms and sb in syms:
+            xi = syms.index(sb)
+            yi = syms.index(sa)
+            fig.add_shape(
+                type="rect",
+                x0=xi - 0.5, x1=xi + 0.5,
+                y0=yi - 0.5, y1=yi + 0.5,
+                line=dict(color="white", width=1.5),
+                layer="above",
+            )
+
+    # coloured tick labels
+    fig.update_xaxes(
+        tickangle=-40, tickfont=dict(size=10),
+        ticktext=[f"<span style=\'color:{c}\'>{s}</span>"
+                  for s, c in zip(syms, tick_colors)],
+        tickvals=syms,
+    )
+    fig.update_yaxes(
+        tickfont=dict(size=10),
+        ticktext=[f"<span style=\'color:{c}\'>{s}</span>"
+                  for s, c in zip(syms, tick_colors)],
+        tickvals=syms,
+    )
+
+    n_kept    = len(result["kept"])
+    n_dropped = len(result["dropped"])
+    dropped_str = (", ".join(result["dropped"]) if result["dropped"] else "none")
+    subtitle = (
+        f"threshold >= {threshold:.0%}  |  "
+        f"{n_kept} kept  |  "
+        f"{n_dropped} dropped: {dropped_str}"
+    )
+
+    _apply_layout(fig,
+                  title=f"Correlation deduplication — {_period_label(period)}",
+                  subtitle=subtitle)
+
+    cell_size = max(40, min(60, 900 // max(n, 1)))
+    fig.update_layout(width=n * cell_size + 160, height=n * cell_size + 160)
     return fig
 
 
